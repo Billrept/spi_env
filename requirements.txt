@@ -1,0 +1,17 @@
+# Python dependencies for hexapod RL training
+# Install with: pip install -r requirements.txt
+
+# Core RL and environment
+gymnasium>=0.29.0
+numpy>=1.24.0
+stable-baselines3>=2.0.0
+
+# Deep learning backend
+torch>=2.0.0
+
+# Monitoring and logging
+tensorboard>=2.13.0
+
+# Optional: For advanced features
+matplotlib>=3.7.0  # Plotting
+pandas>=2.0.0      # Data analysis
