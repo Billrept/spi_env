@@ -25,6 +25,7 @@ while True:
             led.set()
     
     # TEST SENDING DATA FROM CM-550 TO PC
+
     ax = imu.accel_x()
     ay = imu.accel_y()
     az = imu.accel_z()
