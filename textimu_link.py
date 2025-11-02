@@ -1,7 +1,3 @@
-# remocon12_link.py
-# PC-side: parse ASCII IMU lines and send 12 joint targets via Remocon packets.
-# Depends: pyserial, numpy
-
 import serial, threading, time, math, re, numpy as np
 from typing import Optional, List
 
