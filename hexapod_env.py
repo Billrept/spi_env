@@ -45,7 +45,7 @@ class SPIBalance12Env(gym.Env):
         self._last_position_x = 0.0
         # obs: [roll, pitch, yaw, gx, gy, gz, ax, ay, az, qH1..qH6, qV1..qV6] (21-D)
         high_imu = np.array([math.pi]*3 + [50.0]*3 + [5.0]*3, dtype=np.float32)
-        high_q   = np.array([2.5]*12, dtype=np.float32)
+        high_q   = np.array([0.785]*12, dtype=np.float32)
         self.observation_space = spaces.Box(
             low=-np.concatenate([high_imu, high_q]),
             high=np.concatenate([high_imu, high_q]),
