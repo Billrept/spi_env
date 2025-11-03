@@ -291,47 +291,59 @@ class SPIBalance12Env(gym.Env):
         imu = self._imu_online_latest() if self.use_hardware else self._imu_offline()
         obs = self._obs_from_imu(imu)
 
-        # ===== REWARD FUNCTION: Encourage Forward Locomotion with Wave Gait =====
+        # ===== REWARD FUNCTION: Middle-Leg Gait Pattern =====
+        # Goal: Learn to walk using middle legs (ML, MR) with pattern:
+        # Lift → Swing Forward → Down → Push Back
+        
         roll, pitch = obs[0], obs[1]
         qH = obs[9:15]   # horizontal joint angles [FL, FR, ML, MR, RL, RR]
-        qV = obs[15:21]  # vertical joint angles
+        qV = obs[15:21]  # vertical joint angles [FLV, FRV, MLV, MRV, RLV, RRV]
+        
+        # Extract middle leg angles
+        MLH, MRH = qH[2], qH[3]  # Middle horizontal (indices 2, 3)
+        MLV, MRV = qV[2], qV[3]  # Middle vertical (indices 8, 9 in full observation)
         
         # 1. Forward progress reward (PRIMARY OBJECTIVE - DOMINANT REWARD)
-        #    Must be MUCH larger than other rewards to be effective
-        #    Scale by 1000x to make forward movement the main objective
         forward_distance = self._position_x - self._last_position_x
-        r_forward = 1000.0 * forward_distance  # MASSIVELY increased from 15x
+        r_forward = 1000.0 * forward_distance
         self._last_position_x = self._position_x
         
-        # 2. Stability reward - stay upright while moving (normalized to 0-1 range)
-        #    Exponential penalty for tilting
+        # 2. Stability reward - stay upright
         angle_mag = math.sqrt(roll**2 + pitch**2)
-        r_upright = 0.1 * math.exp(-2.5 * angle_mag)  # Reduced from 1.0 to 0.1
+        r_upright = 0.1 * math.exp(-2.5 * angle_mag)
         
-        # 3. Energy efficiency - small penalty for large actions
-        r_smooth = -0.001 * float(np.sum(action**2))  # Reduced from -0.01
+        # 3. Middle leg coordination - encourage synchronized opposite movement
+        #    MLH and MRH should move in opposite directions (±0.4 rad)
+        middle_h_opposite = -(MLH * MRH)  # Negative product = opposite signs
+        r_middle_coord = 0.5 * np.clip(middle_h_opposite, 0, 0.4)  # Reward up to 0.2
         
-        # 4. Gait coordination reward - encourage wave pattern (INCREASED)
-        #    High variance means legs moving differently (coordinated gait)
-        qH_variance = float(np.var(qH))
-        r_gait = 0.5 * min(qH_variance, 0.4)  # INCREASED from 0.05 to 0.5
+        # 4. Vertical lift reward - encourage lifting middle legs
+        #    MLV and MRV should occasionally be positive (lifted)
+        middle_v_lift = np.clip(MLV, 0, 0.3) + np.clip(MRV, 0, 0.3)
+        r_lift = 0.3 * middle_v_lift  # Reward when legs are lifted
         
-        # 4b. Bonus for opposite leg pairs (left vs right coordination) (INCREASED)
-        #     FL vs FR, ML vs MR, RL vs RR should have opposite signs for balanced push
-        pair_opposites = -(qH[0] * qH[1]) - (qH[2] * qH[3]) - (qH[4] * qH[5])
-        r_pair_coordination = 0.2 * np.clip(pair_opposites, -0.5, 0.5)  # INCREASED from 0.02 to 0.2
+        # 5. Discourage other legs from moving too much
+        #    Front and rear legs should stay mostly neutral
+        other_h = np.concatenate([qH[:2], qH[4:]])  # FL, FR, RL, RR
+        other_v = np.concatenate([qV[:2], qV[4:]])  # FLV, FRV, RLV, RRV
+        r_other_penalty = -0.05 * (float(np.sum(other_h**2)) + float(np.sum(other_v**2)))
         
-        # 5. Vertical movement penalty - minimize excessive vertical joint usage
-        r_vertical_penalty = -0.001 * float(np.sum(qV**2))  # Reduced from -0.015
+        # 6. Energy efficiency
+        r_smooth = -0.001 * float(np.sum(action**2))
         
-        # 6. Oscillation reward - encourage ACTIVE movement (temporal variation) (NEW!)
-        #    Reward joints that are changing position (prevents freezing at limits)
-        theta_change = np.abs(self._theta_cmd - self._theta_cmd_prev)
-        r_oscillation = 0.3 * float(np.mean(theta_change))  # Reward average joint movement
-        self._theta_cmd_prev = self._theta_cmd.copy()  # Update for next step
+        # 7. Oscillation reward - encourage ACTIVE movement in middle legs
+        #    Middle legs should be moving (changing position)
+        theta_change_middle = np.abs(self._theta_cmd[2:4] - self._theta_cmd_prev[2:4])  # MLH, MRH
+        r_oscillation = 0.3 * float(np.mean(theta_change_middle))
+        self._theta_cmd_prev = self._theta_cmd.copy()
         
-        # Total reward (forward movement heavily dominates, but gait coordination matters more)
-        reward = r_forward + r_upright + r_smooth + r_gait + r_pair_coordination + r_vertical_penalty + r_oscillation
+        # 8. Saturation penalty - penalize if middle legs are stuck at limits
+        at_limits_middle = (np.abs(self._theta_cmd[2:4]) > 0.735).sum()  # MLH, MRH
+        r_saturation = -1.0 * (at_limits_middle / 2.0)  # -1 if both at limits
+        
+        # Total reward: Forward movement + middle leg coordination + avoid saturation
+        reward = (r_forward + r_upright + r_middle_coord + r_lift + 
+                  r_other_penalty + r_smooth + r_oscillation + r_saturation)
 
         terminated = (abs(math.degrees(roll)) > self.fall_deg) or (abs(math.degrees(pitch)) > self.fall_deg)
         truncated  = (self._t >= self.steps_max)
