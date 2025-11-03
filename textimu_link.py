@@ -21,6 +21,11 @@ CH_MAP_H = [3, 1, 7, 5, 12, 9]   # FLH→3, FRH→1, MLH→7, MRH→5, RLH→12,
 CH_MAP_V = [4, 2, 8, 6, 11, 10]  # FLV→4, FRV→2, MLV→8, MRV→6, RLV→11, RRV→10
 CH_MAP_12 = CH_MAP_H + CH_MAP_V
 
+# Motor inversion flags (True = invert direction)
+# Joint order: [FLH, FRH, MLH, MRH, RLH, RRH, FLV, FRV, MLV, MRV, RLV, RRV]
+INVERT_12 = [False, False, False, False, True, False,  # RLH inverted (index 4)
+             False, False, False, False, False, False]
+
 # ===== Remocon framing =====
 # value16 = [motor_id:4 bits][ticks:12 bits]; packet = FF 55 LB ~LB HB ~HB
 def _checksum_byte(x): return (~x) & 0xFF
@@ -51,16 +56,31 @@ class Remocon12Link:
         self._rx_thread.start()
 
     # ---------- writer: 12 joint angles (radians) ----------
-    def send_joint_targets_rad12(self, q_rad12: List[float]):
+    def send_joint_targets_rad12(self, q_rad12: List[float], debug=False):
+        if debug:
+            print(f"\n[SEND] Input angles (rad): {[f'{q:.3f}' for q in q_rad12]}")
+            print(f"       Range: [{min(q_rad12):.3f}, {max(q_rad12):.3f}]")
+        
+        ticks_list = []
         for joint_idx, q in enumerate(q_rad12[:12]):
             lo, hi = JOINT_LIMITS_12[joint_idx]
+            q_original = q
             q = float(np.clip(q, lo, hi))
+            
+            if INVERT_12[joint_idx]:
+                q = -q
+            
             ticks = _ticks_from_rad(q) & 0x0FFF
+            ticks_list.append(ticks)
             motor_id = CH_MAP_12[joint_idx] & 0x0F  # Motor ID (1-12), not channel
             value = (motor_id << 12) | ticks
             self.ser.write(_pack_remocon(value))
             # 12 packets @ 57.6kbps is tight; tiny pacing helps USB stacks
             time.sleep(0.0008)
+        
+        if debug:
+            print(f"       Ticks: {ticks_list}")
+            print(f"       Degrees: {[f'{(t-2048)/651.74*180/3.14159:.1f}' for t in ticks_list]}")
         
         latch_value = (15 << 12) | 0  
         self.ser.write(_pack_remocon(latch_value))

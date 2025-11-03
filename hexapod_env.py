@@ -59,8 +59,10 @@ class SPIBalance12Env(gym.Env):
 
         # commanded joint angles (what we send/store)
         self._theta_cmd = np.zeros(12, dtype=np.float32)
+        self._theta_cmd_prev = np.zeros(12, dtype=np.float32)  # For oscillation reward
         self._t = 0
         self.steps_max = int(self.episode_seconds * CTRL_HZ)
+        self._debug_counter = 0
 
         # online link only when needed
         self.link = None
@@ -258,6 +260,7 @@ class SPIBalance12Env(gym.Env):
         # initialize commanded pose with small randomization for better exploration
         # Start near neutral with slight variations
         self._theta_cmd[:] = self.np_random.uniform(-0.05, 0.05, size=12).astype(np.float32)
+        self._theta_cmd_prev[:] = self._theta_cmd.copy()  # Initialize prev state
 
         if self.use_hardware:
             imu = self._imu_online_wait()
@@ -279,7 +282,10 @@ class SPIBalance12Env(gym.Env):
 
         # send if online
         if self.use_hardware:
-            self.link.send_joint_targets_rad12(self._theta_cmd.tolist())
+            # Enable debug every 50 steps
+            debug = (self._debug_counter % 50 == 0)
+            self._debug_counter += 1
+            self.link.send_joint_targets_rad12(self._theta_cmd.tolist(), debug=debug)
 
         # get IMU
         imu = self._imu_online_latest() if self.use_hardware else self._imu_offline()
@@ -305,21 +311,27 @@ class SPIBalance12Env(gym.Env):
         # 3. Energy efficiency - small penalty for large actions
         r_smooth = -0.001 * float(np.sum(action**2))  # Reduced from -0.01
         
-        # 4. Gait coordination reward - encourage wave pattern
+        # 4. Gait coordination reward - encourage wave pattern (INCREASED)
         #    High variance means legs moving differently (coordinated gait)
         qH_variance = float(np.var(qH))
-        r_gait = 0.05 * min(qH_variance, 0.4)  # Reduced from 0.8
+        r_gait = 0.5 * min(qH_variance, 0.4)  # INCREASED from 0.05 to 0.5
         
-        # 4b. Bonus for opposite leg pairs (left vs right coordination)
+        # 4b. Bonus for opposite leg pairs (left vs right coordination) (INCREASED)
         #     FL vs FR, ML vs MR, RL vs RR should have opposite signs for balanced push
         pair_opposites = -(qH[0] * qH[1]) - (qH[2] * qH[3]) - (qH[4] * qH[5])
-        r_pair_coordination = 0.02 * np.clip(pair_opposites, -0.5, 0.5)  # Reduced from 0.3
+        r_pair_coordination = 0.2 * np.clip(pair_opposites, -0.5, 0.5)  # INCREASED from 0.02 to 0.2
         
         # 5. Vertical movement penalty - minimize excessive vertical joint usage
         r_vertical_penalty = -0.001 * float(np.sum(qV**2))  # Reduced from -0.015
         
-        # Total reward (forward movement heavily dominates)
-        reward = r_forward + r_upright + r_smooth + r_gait + r_pair_coordination + r_vertical_penalty
+        # 6. Oscillation reward - encourage ACTIVE movement (temporal variation) (NEW!)
+        #    Reward joints that are changing position (prevents freezing at limits)
+        theta_change = np.abs(self._theta_cmd - self._theta_cmd_prev)
+        r_oscillation = 0.3 * float(np.mean(theta_change))  # Reward average joint movement
+        self._theta_cmd_prev = self._theta_cmd.copy()  # Update for next step
+        
+        # Total reward (forward movement heavily dominates, but gait coordination matters more)
+        reward = r_forward + r_upright + r_smooth + r_gait + r_pair_coordination + r_vertical_penalty + r_oscillation
 
         terminated = (abs(math.degrees(roll)) > self.fall_deg) or (abs(math.degrees(pitch)) > self.fall_deg)
         truncated  = (self._t >= self.steps_max)

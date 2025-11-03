@@ -17,14 +17,37 @@ def main():
 
     model = PPO.load(MODEL_PATH, env=venv)
     obs = venv.reset()
+    
+    print("\n=== INITIAL OBSERVATION ===")
+    print(f"IMU (9D): {obs[0, :9]}")
+    print(f"theta_cmd (12D): {obs[0, 9:]}")
+    print(f"theta_cmd range: [{obs[0, 9:].min():.4f}, {obs[0, 9:].max():.4f}]")
+    
+    step_count = 0
     try:
         while True:
             action, _ = model.predict(obs, deterministic=True)
+            
+            if step_count < 5 or step_count % 50 == 0:
+                print(f"\n=== STEP {step_count} ===")
+                print(f"Action: {action[0]}")
+                print(f"Action range: [{action[0].min():.4f}, {action[0].max():.4f}]")
+            
             obs, reward, done, info = venv.step(action)
+            
+            if step_count < 5 or step_count % 50 == 0:
+                print(f"New theta_cmd: {obs[0, 9:]}")
+                print(f"theta_cmd range: [{obs[0, 9:].min():.4f}, {obs[0, 9:].max():.4f}]")
+                print(f"Reward: {reward[0]:.4f}")
+            
+            step_count += 1
+            
             if done.any():
+                print(f"\n=== EPISODE DONE after {step_count} steps ===")
                 obs = venv.reset()
+                step_count = 0
     except KeyboardInterrupt:
-        pass
+        print(f"\nStopped after {step_count} steps")
     finally:
         venv.close()
 
