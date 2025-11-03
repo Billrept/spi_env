@@ -15,8 +15,8 @@ def main():
     # The 1000x forward reward scaling is intentional and should not be normalized
     train_venv = VecNormalize(train_venv, norm_obs=True, norm_reward=False, clip_obs=10.0)
 
-    model = PPO("MlpPolicy", train_venv, learning_rate=3e-4, n_steps=2048, batch_size=64,
-                gamma=0.99, gae_lambda=0.95, clip_range=0.2, ent_coef=0.01, 
+    model = PPO("MlpPolicy", train_venv, learning_rate=3e-4, n_steps=2048, batch_size=128,
+                gamma=0.99, gae_lambda=0.95, clip_range=0.2, ent_coef=0.01,
                 verbose=1, tensorboard_log="./tb/")
 
     # --- Eval env (must match training settings) ---
@@ -32,7 +32,7 @@ def main():
                            deterministic=True, render=False)
     ckpt_cb = CheckpointCallback(save_freq=50_000, save_path="./runs/ckpt/", name_prefix="ppo_spi12")
 
-    model.learn(total_timesteps=500_000, callback=[eval_cb, ckpt_cb])
+    model.learn(total_timesteps=1_000_000, callback=[eval_cb, ckpt_cb])
 
     # Save model & normalization stats
     model.save("./runs/final/ppo_spi12_offline")
