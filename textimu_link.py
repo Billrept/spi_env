@@ -16,14 +16,13 @@ JOINT_LIMITS_H = [(-2.094, 2.094)] * 6  # ±120°
 JOINT_LIMITS_V = [(-2.094, 2.094)] * 6
 JOINT_LIMITS_12 = JOINT_LIMITS_H + JOINT_LIMITS_V
 
-# Channel mapping: which channel id (0..11) controls which joint index.
-# By default: H joints -> channels 0..5, V joints -> channels 6..11.
-CH_MAP_H = [4, 2, 8, 6, 12, 10] #FLH FRH MLH MRH RLH RRH
-CH_MAP_V = [3, 1, 7, 5, 11, 9] #FLV FRV MLV MRV RLV RRV
+# Joint order: [FLH, FRH, MLH, MRH, RLH, RRH, FLV, FRV, MLV, MRV, RLV, RRV]
+CH_MAP_H = [4, 2, 7, 5, 12, 10]  # FLH→4, FRH→2, MLH→7, MRH→5, RLH→12, RRH→10
+CH_MAP_V = [3, 1, 8, 6, 11, 9]   # FLV→3, FRV→1, MLV→8, MRV→6, RLV→11, RRV→9
 CH_MAP_12 = CH_MAP_H + CH_MAP_V
 
 # ===== Remocon framing =====
-# value16 = [chan:4 bits][ticks:12 bits]; packet = FF 55 LB ~LB HB ~HB
+# value16 = [motor_id:4 bits][ticks:12 bits]; packet = FF 55 LB ~LB HB ~HB
 def _checksum_byte(x): return (~x) & 0xFF
 def _pack_remocon(value16: int) -> bytes:
     lb = value16 & 0xFF
@@ -31,7 +30,8 @@ def _pack_remocon(value16: int) -> bytes:
     return bytes([0xFF, 0x55, lb, _checksum_byte(lb), hb, _checksum_byte(hb)])
 
 def _ticks_from_rad(q: float) -> int:
-    return int(np.clip(round(q * RAD2TICKS), 0, 4095))
+    ticks = 2048 + int(round(q * RAD2TICKS)) 
+    return int(np.clip(ticks, 0, 4095))
 
 DEG2RAD = math.pi / 180.0
 
@@ -56,11 +56,13 @@ class Remocon12Link:
             lo, hi = JOINT_LIMITS_12[joint_idx]
             q = float(np.clip(q, lo, hi))
             ticks = _ticks_from_rad(q) & 0x0FFF
-            channel = CH_MAP_12[joint_idx] & 0x0F
-            value = (channel << 12) | ticks
+            motor_id = CH_MAP_12[joint_idx] & 0x0F  # Motor ID (1-12), not channel
+            value = (motor_id << 12) | ticks
             self.ser.write(_pack_remocon(value))
             # 12 packets @ 57.6kbps is tight; tiny pacing helps USB stacks
             time.sleep(0.0008)
+        latch_value = (15 << 12) | 0 
+        self.ser.write(_pack_remocon(latch_value))
 
     # ---------- reader: parse RAW / KF lines ----------
     def _parse_raw_line(self, line: str) -> Optional[dict]:
