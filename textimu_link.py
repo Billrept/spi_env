@@ -18,8 +18,8 @@ JOINT_LIMITS_12 = JOINT_LIMITS_H + JOINT_LIMITS_V
 
 # Channel mapping: which channel id (0..11) controls which joint index.
 # By default: H joints -> channels 0..5, V joints -> channels 6..11.
-CH_MAP_H = [0, 1, 2, 3, 4, 5]
-CH_MAP_V = [6, 7, 8, 9, 10, 11]
+CH_MAP_H = [4, 2, 8, 6, 12, 10] #FLH FRH MLH MRH RLH RRH
+CH_MAP_V = [3, 1, 7, 5, 11, 9] #FLV FRV MLV MRV RLV RRV
 CH_MAP_12 = CH_MAP_H + CH_MAP_V
 
 # ===== Remocon framing =====

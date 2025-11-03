@@ -11,15 +11,17 @@ def env_fn():
 def main():
     # --- Train env ---
     train_venv = DummyVecEnv([env_fn])
-    train_venv = VecNormalize(train_venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
+    # CRITICAL: norm_reward=False to preserve our carefully tuned reward structure!
+    # The 1000x forward reward scaling is intentional and should not be normalized
+    train_venv = VecNormalize(train_venv, norm_obs=True, norm_reward=False, clip_obs=10.0)
 
     model = PPO("MlpPolicy", train_venv, learning_rate=3e-4, n_steps=2048, batch_size=64,
                 gamma=0.99, gae_lambda=0.95, clip_range=0.2, ent_coef=0.01, 
                 verbose=1, tensorboard_log="./tb/")
 
-    # --- Eval env (must be VecNormalize too) ---
+    # --- Eval env (must match training settings) ---
     eval_venv = DummyVecEnv([env_fn])
-    eval_venv = VecNormalize(eval_venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
+    eval_venv = VecNormalize(eval_venv, norm_obs=True, norm_reward=False, clip_obs=10.0)
     eval_venv.training = False                # don't update stats
     # sync running means/vars from train to eval
     eval_venv.obs_rms = train_venv.obs_rms
