@@ -20,8 +20,8 @@ FALL_DEG = 60.0  # More lenient fall threshold for better learning
 MAX_STEP_RAD_H = 0.05
 MAX_STEP_RAD_V = 0.05
 
-# real joint limits (safety clamp); match remocon12_link
-JOINT_LIMITS_12 = [(-2.094, 2.094)] * 9  # ±120°
+# real joint limits (safety clamp); center at 180° (2048 ticks) ± 45°
+JOINT_LIMITS_12 = [(-0.785, 0.785)] * 12  # ±45° from center (135° to 225°)
 
 class SPIBalance12Env(gym.Env):
     metadata = {"render_modes": []}
@@ -142,10 +142,10 @@ class SPIBalance12Env(gym.Env):
         # Initialize velocity tracking if needed
         if not hasattr(self, '_velocity_x'):
             self._velocity_x = 0.0
-        
+
         # Update velocity: v_new = v_old * drag + accel * dt
         self._velocity_x = self._velocity_x * DRAG + forward_accel * DT
-        
+
         # Clamp to realistic hexapod speed range
         self._velocity_x = np.clip(self._velocity_x, -0.3, MAX_SPEED)
         

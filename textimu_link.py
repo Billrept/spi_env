@@ -11,9 +11,9 @@ TICKS_PER_REV = 4096
 TICKS2RAD = 2 * math.pi / TICKS_PER_REV
 RAD2TICKS = 1.0 / TICKS2RAD
 
-# Real joint limits (radians). First 6 = H, next 6 = V. Adjust per your mechanics.
-JOINT_LIMITS_H = [(-2.094, 2.094)] * 6  # ±120°
-JOINT_LIMITS_V = [(-2.094, 2.094)] * 6
+# Real joint limits (radians). Center at 180° (2048 ticks) ± 45°
+JOINT_LIMITS_H = [(-0.785, 0.785)] * 6  # ±45° from center (135° to 225°)
+JOINT_LIMITS_V = [(-0.785, 0.785)] * 6  # ±45° from center (135° to 225°)
 JOINT_LIMITS_12 = JOINT_LIMITS_H + JOINT_LIMITS_V
 
 # Joint order: [FLH, FRH, MLH, MRH, RLH, RRH, FLV, FRV, MLV, MRV, RLV, RRV]
@@ -61,7 +61,8 @@ class Remocon12Link:
             self.ser.write(_pack_remocon(value))
             # 12 packets @ 57.6kbps is tight; tiny pacing helps USB stacks
             time.sleep(0.0008)
-        latch_value = (15 << 12) | 0 
+        
+        latch_value = (15 << 12) | 0  
         self.ser.write(_pack_remocon(latch_value))
 
     # ---------- reader: parse RAW / KF lines ----------
