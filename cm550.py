@@ -88,18 +88,10 @@ def apply_latch():
 
 # ======== Main loop: handle Remocon + IMU Kalman + printing ========
 while True:
-    # ---- Remocon receive (unchanged prints/behavior) ----
+    # ---- Remocon receive (keep same print text) ----
     if rc.received():
         val = rc.read()
         print("Received:", val)
-        if val == 1:
-            led.set(const.RED)
-        elif val == 2:
-            led.set(const.GREEN)
-        elif val == 3:
-            led.set(const.BLUE)
-        elif val == 0:
-            led.set()
 
         # Decode for multi-servo protocol (upper 4 bits = sid, lower 12 bits = pos)
         sid = (val >> 12) & 0x0F
@@ -140,4 +132,4 @@ while True:
           .format(imu.roll()/100.0, imu.pitch()/100.0, yaw_deg, ax, ay, az, gx, gy))
     print("KF   R/P(deg):   {:.2f} {:.2f}".format(roll_kf, pitch_kf))
 
-    delay(20)  # ~50 Hz
+    delay(20)  # ~50
