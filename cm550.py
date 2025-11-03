@@ -64,7 +64,31 @@ kf_pitch = KalmanAxis();  kf_pitch.set_angle(pitch0)
 
 t_prev = millis()
 
+# ======== Motors: Remocon multi-servo receiver (buffer + latch) ========
+rc.port(2)  # USB remocon channel (kept)
+print("Remocon multi-servo receiver (buffer + latch)")
+
+# Power the bus and prep 12 motors (IDs 1..12) in position mode
+dxlbus.power_on()
+MOT_IDS = list(range(1, 13))
+mot = {sid: DXL(sid) for sid in MOT_IDS}
+for sid in MOT_IDS:
+    m = mot[sid]
+    m.mode(3)          # position mode
+    m.torque_on()
+
+# Buffer of next goals (ticks)
+buf = {sid: 2048 for sid in MOT_IDS}  # default center
+HAVE = set()  # which IDs got updated in current frame
+
+def apply_latch():
+    # Apply all buffered goals “together”
+    for sid in MOT_IDS:
+        mot[sid].goal_position(buf[sid])
+
+# ======== Main loop: handle Remocon + IMU Kalman + printing ========
 while True:
+    # ---- Remocon receive (unchanged prints/behavior) ----
     if rc.received():
         val = rc.read()
         print("Received:", val)
@@ -76,7 +100,26 @@ while True:
             led.set(const.BLUE)
         elif val == 0:
             led.set()
-    
+
+        # Decode for multi-servo protocol (upper 4 bits = sid, lower 12 bits = pos)
+        sid = (val >> 12) & 0x0F
+        pos = val & 0x0FFF
+
+        if sid == 15:
+            # LATCH: push all buffered goals now
+            apply_latch()
+            print("LATCH applied; frame = { " + ", ".join(["%d:%d" % (i, buf[i]) for i in MOT_IDS]) + " }")
+            HAVE.clear()
+        elif 1 <= sid <= 12:
+            buf[sid] = pos
+            HAVE.add(sid)
+            # Optional debug (left commented to preserve your serial text):
+            # print("Buffered ID %d -> %d" % (sid, pos))
+        else:
+            # ignore invalid id
+            pass
+
+    # ---- IMU Kalman update + prints (unchanged sentence structures) ----
     t_now = millis()
     dt = max(0.001, min(0.05, (t_now - t_prev)/1000.0))
     t_prev = t_now
@@ -96,4 +139,5 @@ while True:
     print("RAW  R/P/Y(deg): {:.2f} {:.2f} {:.2f} | ACC(g): {:.3f} {:.3f} {:.3f} | GYRO(dps): {:.2f} {:.2f}"
           .format(imu.roll()/100.0, imu.pitch()/100.0, yaw_deg, ax, ay, az, gx, gy))
     print("KF   R/P(deg):   {:.2f} {:.2f}".format(roll_kf, pitch_kf))
+
     delay(20)  # ~50 Hz
