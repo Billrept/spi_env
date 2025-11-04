@@ -38,20 +38,23 @@ class SPIBalance12Env(gym.Env):
         # FIX: Track actual forward movement for better reward calculation
         self._step_count = 0
         self._cumulative_distance = 0.0
+        self._total_reward = 0.0
+        self._movement_scale = 0.0005  # Reduced for more realistic movement
         
-        high_imu = np.array([math.pi]*3 + [50.0]*3 + [5.0]*3, dtype=np.float32)
-        high_q   = np.array([0.785]*12, dtype=np.float32)
+        # Initialize observation space
+        obs_size = 21  # 9 IMU values + 12 joint angles
         self.observation_space = spaces.Box(
-            low=-np.concatenate([high_imu, high_q]),
-            high=np.concatenate([high_imu, high_q]),
-            dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32
         )
 
         low  = np.array([-MAX_STEP_RAD_H]*6 + [-MAX_STEP_RAD_V]*6, dtype=np.float32)
         high = np.array([+MAX_STEP_RAD_H]*6 + [+MAX_STEP_RAD_V]*6, dtype=np.float32)
         self.action_space = spaces.Box(low, high, dtype=np.float32)
 
+        # Initialize state variables
         self._theta_cmd = np.zeros(12, dtype=np.float32)
+        self._last_imu = None  # FIX: Initialize with None
+
         self._t = 0
         self.steps_max = int(self.episode_seconds * CTRL_HZ)
 
@@ -60,34 +63,90 @@ class SPIBalance12Env(gym.Env):
             from textimu_link import Remocon12Link
             self.link = Remocon12Link(port=self.port)
 
+        # Set IMU function based on hardware flag
+        self._imu_fn = self._imu_offline if not use_hardware else self._imu_online
+        
+        # Initialize position tracking
+        self._last_position_x = 0.0
+        self._position_x = 0.0
+        self._cumulative_distance = 0.0
+        self._total_reward = 0.0
+        self._movement_scale = 0.0005
+        
     def _imu_offline(self):
-        """FIXED: Simplified and more effective physics"""
+        """Mock IMU data for offline training"""
+        return {
+            'ax': 0.0,     # Acceleration in m/s^2
+            'ay': 0.0,
+            'az': -9.81,   # Gravity
+            'gx': 0.0,     # Angular velocity in rad/s
+            'gy': 0.0,
+            'gz': 0.0,
+            'roll': 0.0,   # Orientation in radians
+            'pitch': 0.0,
+            'yaw': 0.0
+        }
+
+    def _get_obs(self, imu):
+        """Convert IMU and joint data into observation vector"""
+        # IMU data (9 values)
+        imu_data = np.array([
+            imu['ax'], imu['ay'], imu['az'],    # Accelerometer
+            imu['gx'], imu['gy'], imu['gz'],    # Gyroscope
+            imu['roll'], imu['pitch'], imu['yaw']  # Orientation
+        ], dtype=np.float32)
+        
+        # Combine IMU and joint angles
+        obs = np.concatenate([
+            imu_data,           # 9 IMU values
+            self._theta_cmd     # 12 joint angles
+        ])
+        
+        return obs.astype(np.float32)
+
+    def _imu_offline(self):
+        """ULTRA-SIMPLIFIED physics to debug position tracking"""
         x = self._state.copy()
         qH = self._theta_cmd[:6]
         qV = self._theta_cmd[6:]
 
-        # FIX: Much simpler and more effective forward force calculation
-        # Key insight: Treat hexapod like a differential drive
-        # Left legs (0,2,4) vs Right legs (1,3,5)
+        # ===== FORCE CALCULATION =====
+        # Physical model: Legs sweeping backward push the body forward
+        # Left legs: negative angle = backward sweep = forward push
+        # Right legs: positive angle = backward sweep = forward push
         
-        left_sweep = np.mean(qH[[0, 2, 4]])   # Average left leg angles
-        right_sweep = np.mean(qH[[1, 3, 5]])  # Average right leg angles
+        left_legs = qH[[0, 2, 4]]   # FL, ML, RL
+        right_legs = qH[[1, 3, 5]]  # FR, MR, RR
         
-        # Forward motion when legs sweep backward (negative for left, positive for right)
-        # This creates a "rowing" motion
-        forward_push = -(left_sweep + right_sweep) / 2.0  # Both pushing back = forward
+        # Convert joint angles to forward push force
+        # Negative left angles = backward sweep = positive forward force
+        # Positive right angles = backward sweep = positive forward force
+        left_push = -np.sum(left_legs)    # Negate because negative input should give positive output
+        right_push = np.sum(right_legs)   # Positive input gives positive output
+        total_push = (left_push + right_push) / 6.0  # Average per leg
         
-        # Vertical joints control ground contact (negative = pushing down = good)
-        ground_contact = np.mean(np.clip(-qV, 0.0, 0.785))  # Only count downward push
+        # Ground contact from vertical joints (negative = pushing down = good)
+        ground_pressure = np.mean(np.clip(-qV, 0.0, 0.785))
         
-        # FIX: Combined force with much stronger coefficient
-        # Scale by 10.0 to make movement clearly visible
-        forward_force = forward_push * (0.5 + ground_contact) * 10.0
+        # CRITICAL: MUCH stronger force multiplier for visible movement
+        FORCE_MULTIPLIER = 300.0  # Need big movements for RL!
+        forward_force = total_push * (0.5 + ground_pressure) * FORCE_MULTIPLIER
         
-        # FIX: Simplified dynamics
-        MASS = 1.2  # Lighter
-        FRICTION = 0.9  # High grip
-        DRAG = 0.85  # Some resistance (lower = more drag)
+        # ===== PHYSICS INTEGRATION =====
+        MASS = 0.8   # Lighter for more responsive movement
+        FRICTION = 0.95
+        DRAG = 0.75  # More drag to stabilize
+        
+        # F = ma
+        accel = (forward_force * FRICTION) / MASS
+        
+        # Update velocity
+        self._velocity_x = float(self._velocity_x * DRAG + accel * DT)
+        self._velocity_x = np.clip(self._velocity_x, -0.5, 1.5)
+        
+        # Update position
+        delta_x = self._velocity_x * DT
+        self._position_x = float(self._position_x + delta_x)
         
         # Update velocity
         forward_accel = (forward_force * FRICTION) / MASS
@@ -157,13 +216,8 @@ class SPIBalance12Env(gym.Env):
         imu = self.link.read_latest_imu(DT) or self.link.wait_first_imu()
         return imu
 
-    def _obs_from_imu(self, imu):
-        roll, pitch, yaw = imu["rpy"]
-        gx, gy, gz = imu["gyro"]
-        ax, ay, az = imu["acc"]
-        return np.array([roll, pitch, yaw, gx, gy, gz, ax, ay, az, *self._theta_cmd], dtype=np.float32)
-
     def reset(self, *, seed=None, options=None):
+        
         super().reset(seed=seed)
         self._t = 0
         self._step_count = 0
@@ -173,6 +227,7 @@ class SPIBalance12Env(gym.Env):
         self._last_position_x = 0.0
         self._velocity_x = 0.0  # CRITICAL: Reset velocity!
         self._cumulative_distance = 0.0
+        self._total_reward = 0.0
         self._state = np.zeros(6, dtype=np.float32)  # Reset orientation
 
         # FIX: Better initial pose - start with slight stance
@@ -186,9 +241,12 @@ class SPIBalance12Env(gym.Env):
         else:
             imu = self._imu_offline()
 
-        return self._obs_from_imu(imu), {}
+        return self._get_obs(imu), {}
 
     def step(self, action):
+        self._step_count += 1
+        self._last_position_x = self._position_x
+        
         action = np.clip(action, self.action_space.low, self.action_space.high)
         theta = self._theta_cmd + action
 
@@ -200,53 +258,41 @@ class SPIBalance12Env(gym.Env):
             self.link.send_joint_targets_rad12(self._theta_cmd.tolist())
 
         imu = self._imu_online_latest() if self.use_hardware else self._imu_offline()
-        obs = self._obs_from_imu(imu)
+        obs = self._get_obs(imu)
 
-        # FIX: Completely redesigned reward function
-        roll, pitch = obs[0], obs[1]
-        qH = obs[9:15]
-        qV = obs[15:21]
+        # Calculate movement based on action direction
+        action_mean = float(np.mean(action))
+        dx = action_mean * self._movement_scale
         
-        # 1. FIX: Forward movement reward (DOMINANT)
-        # Use velocity directly instead of tiny position deltas
-        forward_distance = self._position_x - self._last_position_x
-        self._cumulative_distance += forward_distance
-        self._last_position_x = self._position_x
+        # Update position and cumulative distance
+        self._position_x += dx
+        self._cumulative_distance += abs(dx)
         
-        # Reward both instantaneous velocity AND cumulative progress
-        r_forward = 50.0 * max(self._velocity_x, 0.0)  # Reward forward velocity
-        r_forward += 200.0 * forward_distance  # Big bonus for actual movement
+        # Calculate reward with better scaling
+        # Larger reward for forward motion, small penalty for backward
+        if dx > 0:
+            reward = dx * 1000.0  # Scale up forward reward
+        else:
+            reward = dx * 100.0   # Smaller penalty for backward
+            
+        self._total_reward += reward
         
-        # FIX: Bonus for sustained forward progress
-        if self._step_count > 0 and self._cumulative_distance > 0.01 * self._step_count:
-            r_forward += 5.0  # Consistency bonus
+        # Get observations and check termination
+        imu = self._imu_fn()
+        obs = self._get_obs(imu)
+        terminated = self._check_terminated(imu)
+        truncated = (self._step_count >= self._max_steps)
         
-        # 2. Stability (secondary)
-        angle_mag = math.sqrt(roll**2 + pitch**2)
-        r_upright = 2.0 * math.exp(-3.0 * angle_mag)  # Small but helps
+        info = {
+            'position_x': self._position_x,
+            'cumulative_distance': self._cumulative_distance,
+            'dx': dx,
+            'total_reward': self._total_reward,
+            'action_mean': action_mean,
+            'step_count': self._step_count
+        }
         
-        # 3. Energy efficiency
-        r_smooth = -0.01 * float(np.sum(action**2))
-        
-        # 4. FIX: Encourage alternating gait pattern
-        # Reward when left and right legs are doing opposite things
-        left_h = np.mean(qH[[0, 2, 4]])
-        right_h = np.mean(qH[[1, 3, 5]])
-        r_gait = 3.0 * abs(left_h - right_h)  # Reward difference
-        
-        # 5. FIX: Encourage ground contact (negative vertical = pushing down)
-        ground_pressure = -np.mean(qV)  # Negative is good
-        r_ground = 2.0 * np.clip(ground_pressure, 0.0, 0.5)
-        
-        # Total reward
-        reward = r_forward + r_upright + r_smooth + r_gait + r_ground
-
-        terminated = (abs(math.degrees(roll)) > self.fall_deg) or (abs(math.degrees(pitch)) > self.fall_deg)
-        truncated = (self._t >= self.steps_max)
-        self._t += 1
-        self._step_count += 1
-        
-        return obs, reward, terminated, truncated, {}
+        return obs, reward, terminated, truncated, info
 
     def render(self): pass
 

@@ -44,5 +44,3 @@ while True:
             pass
 
     delay(2)
-
-dxlbus.power_o
