@@ -334,42 +334,50 @@ class SPIBalance12Env(gym.Env):
         imu = self._imu_online_latest() if self.use_hardware else self._imu_offline()
         obs = self._obs_from_imu(imu)
 
-        # ===== REWARD FUNCTION: Simple Push-Pull Gait (EASIEST) =====
-        # Goal: Learn the SIMPLEST possible locomotion:
-        #   All 6 legs work together in synchronized push-pull cycle
-        #   No complex phase coordination needed!
-        # Pattern: All legs push back together → body moves forward
+        # ===== REWARD FUNCTION: Rear-Leg Crawl (SIMPLEST!) =====
+        # Goal: Learn the ABSOLUTE SIMPLEST locomotion:
+        #   Only RLH and RRH move (rear two legs)
+        #   All other legs stay at neutral (act as support)
+        # Pattern: Rear legs push back together → body crawls forward
         
         roll, pitch = obs[0], obs[1]
         qH = obs[9:15]   # horizontal joint angles [FL, FR, ML, MR, RL, RR]
         qV = obs[15:21]  # vertical joint angles [FLV, FRV, MLV, MRV, RLV, RRV]
+        
+        # Extract ONLY rear legs (RL=index 4, RR=index 5)
+        RLH = qH[4]  # Rear-Left Horizontal
+        RRH = qH[5]  # Rear-Right Horizontal
         
         # 1. Forward progress reward (PRIMARY OBJECTIVE - DOMINANT REWARD)
         forward_distance = self._position_x - self._last_position_x
         r_forward = 1000.0 * forward_distance
         self._last_position_x = self._position_x
         
-        # 2. Stability reward - stay upright (increased weight for simpler gait)
+        # 2. Stability reward - stay upright (critical since only 2 legs moving)
         angle_mag = math.sqrt(roll**2 + pitch**2)
-        r_upright = 1.0 * math.exp(-2.5 * angle_mag)
+        r_upright = 2.0 * math.exp(-2.5 * angle_mag)  # Increased to 2.0 (very important!)
         
-        # 3. Synchronized horizontal movement - encourage all legs to move together
-        #    Reward when all horizontal joints have similar positions (synchronized)
-        mean_qH = float(np.mean(qH))
-        # Reward low variance = all legs moving in sync
-        variance_qH = float(np.var(qH))
-        r_sync = 0.5 * math.exp(-5.0 * variance_qH)  # Higher reward when variance is low
+        # 3. Rear leg coordination - encourage RLH and RRH to move together
+        #    Both rear legs should have similar angles (synchronized crawl)
+        rear_diff = abs(RLH - RRH)
+        r_rear_sync = 1.0 * math.exp(-10.0 * rear_diff)  # Strong reward when similar
         
-        # 4. Oscillation reward - encourage rhythmic back-and-forth movement
-        #    All legs should be moving (changing position over time)
-        theta_change_H = np.abs(self._theta_cmd[:6] - self._theta_cmd_prev[:6])  # Horizontal only
-        mean_motion = float(np.mean(theta_change_H))
-        r_oscillation = 2.0 * np.clip(mean_motion, 0, 0.2)  # Reward up to 0.4 for good motion
+        # 4. Rear leg oscillation - encourage rhythmic back-and-forth
+        #    Only track rear legs (indices 4, 5)
+        RL_change = abs(self._theta_cmd[4] - self._theta_cmd_prev[4])
+        RR_change = abs(self._theta_cmd[5] - self._theta_cmd_prev[5])
+        mean_rear_motion = (RL_change + RR_change) / 2.0
+        r_rear_oscillation = 3.0 * np.clip(mean_rear_motion, 0, 0.3)  # Strong reward for movement
         
-        # 5. Keep vertical legs mostly down - simpler than lifting
-        #    Small penalty for excessive vertical movement (let policy learn minimal lift if needed)
+        # 5. Keep other legs neutral - front and middle should stay near 0
+        #    Penalize FL, FR, ML, MR if they move too much
+        other_H = np.array([qH[0], qH[1], qH[2], qH[3]], dtype=np.float32)  # FL, FR, ML, MR
+        other_H_deviation = float(np.sum(np.abs(other_H)))
+        r_other_neutral = -0.5 * other_H_deviation  # Penalty for moving non-rear legs
+        
+        # 6. Keep ALL vertical legs down - no lifting needed for crawl
         mean_qV_abs = float(np.mean(np.abs(qV)))
-        r_vertical = -0.1 * mean_qV_abs  # Slight penalty for lifting (but not forbidden)
+        r_vertical = -0.2 * mean_qV_abs  # Stronger penalty than before
         
         # 6. Energy efficiency - penalize large actions
         r_smooth = -0.001 * float(np.sum(action**2))
@@ -400,9 +408,9 @@ class SPIBalance12Env(gym.Env):
         else:
             r_tracking = 0.0
         
-        # Total reward: SIMPLEST gait (9 components, no complex phase coordination)
-        reward = (r_forward + r_upright + r_sync + r_oscillation + r_vertical + 
-                  r_smooth + r_saturation + r_stuck + r_tracking)
+        # Total reward: ULTRA-SIMPLE rear-leg crawl (9 components)
+        reward = (r_forward + r_upright + r_rear_sync + r_rear_oscillation + 
+                  r_other_neutral + r_vertical + r_smooth + r_saturation + r_stuck + r_tracking)
 
         terminated = (abs(math.degrees(roll)) > self.fall_deg) or (abs(math.degrees(pitch)) > self.fall_deg)
         truncated  = (self._t >= self.steps_max)
