@@ -85,7 +85,12 @@ HAVE = set()  # which IDs got updated in current frame
 def apply_latch():
     # Apply all buffered goals “together”
     for sid in MOT_IDS:
-        mot[sid].goal_position(buf[sid])
+        if sid == 1 or sid == 7 or sid == 11:
+            mot[sid].goal_position(4095 - buf[sid])
+        elif sid == 8:
+            mot[sid].goal_position(buf[sid] + 550)
+        else:
+            mot[sid].goal_position(buf[sid])
 
 # ======== Main loop: handle Remocon + IMU Kalman + printing ========
 while True:
