@@ -17,8 +17,8 @@ JOINT_LIMITS_V = [(-0.785, 0.785)] * 6  # ±45° from center (135° to 225°)
 JOINT_LIMITS_12 = JOINT_LIMITS_H + JOINT_LIMITS_V
 
 # Joint order: [FLH, FRH, MLH, MRH, RLH, RRH, FLV, FRV, MLV, MRV, RLV, RRV]
-CH_MAP_H = [3, 1, 7, 5, 12, 9]   # FLH→3, FRH→1, MLH→7, MRH→5, RLH→12, RRH→9
-CH_MAP_V = [4, 2, 8, 6, 11, 10]  # FLV→4, FRV→2, MLV→8, MRV→6, RLV→11, RRV→10
+CH_MAP_H = [3, 1, 7, 5, 11, 9]   # FLH→3, FRH→1, MLH→7, MRH→5, RLH→11, RRH→9
+CH_MAP_V = [4, 2, 8, 6, 12, 10]  # FLV→4, FRV→2, MLV→8, MRV→6, RLV→12, RRV→10
 CH_MAP_12 = CH_MAP_H + CH_MAP_V
 
 # Motor inversion flags (True = invert direction)

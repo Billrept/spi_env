@@ -16,7 +16,7 @@ def main():
     train_venv = VecNormalize(train_venv, norm_obs=True, norm_reward=False, clip_obs=10.0)
 
     model = PPO("MlpPolicy", train_venv, learning_rate=3e-4, n_steps=2048, batch_size=128,
-                gamma=0.99, gae_lambda=0.95, clip_range=0.2, ent_coef=0.02,  # Increased from 0.01 for more exploration
+                gamma=0.99, gae_lambda=0.95, clip_range=0.2, ent_coef=0.023,
                 verbose=1, tensorboard_log="./tb/")
 
     # --- Eval env (must match training settings) ---
