@@ -76,7 +76,7 @@ class Remocon12Link:
             value = (motor_id << 12) | ticks
             self.ser.write(_pack_remocon(value))
             # 12 packets @ 57.6kbps is tight; tiny pacing helps USB stacks
-            time.sleep(0.0008)
+            time.sleep(0.001)
         
         if debug:
             print(f"       Ticks: {ticks_list}")
@@ -84,6 +84,7 @@ class Remocon12Link:
         
         latch_value = (15 << 12) | 0  
         self.ser.write(_pack_remocon(latch_value))
+        self.ser.flush()
 
     # ---------- reader: parse RAW / KF lines ----------
     def _parse_raw_line(self, line: str) -> Optional[dict]:
