@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """
 Diagnose episode-level command sending patterns.
 Monitors what happens during reset vs step.

@@ -133,5 +133,9 @@ while True:
     print("RAW  R/P/Y(deg): {:.2f} {:.2f} {:.2f} | ACC(g): {:.3f} {:.3f} {:.3f} | GYRO(dps): {:.2f} {:.2f} {:.2f}"
           .format(imu.roll()/100.0, imu.pitch()/100.0, yaw_deg, ax, ay, az, gx, gy, gz))  # Added gz to print
     print("KF   R/P(deg):   {:.2f} {:.2f}".format(roll_kf, pitch_kf))
+    
+    # Add current servo positions print
+    servo_positions = [mot[sid].goal_position() for sid in MOT_IDS]
+    print("Servo Positions:", " ".join(["ID{}:{}".format(sid, pos) for sid, pos in zip(MOT_IDS, servo_positions)]))
 
     delay(20)  # ~50

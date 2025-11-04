@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """
 Diagnose LATCH timing issues with the CM-550 controller.
 Tests different send rates and timing patterns.

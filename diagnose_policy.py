@@ -1,8 +1,3 @@
-#!/usr/bin/env python3
-"""
-Diagnostic script to check policy behavior and identify issues.
-Run this on both training and deployment computers.
-"""
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from hexapod_env import SPIBalance12Env
