@@ -3,13 +3,12 @@
 #   - use_hardware=True:  serial IMU + remocon packets; run on robot
 #
 # TASK: Forward locomotion - move the spider robot forward using horizontal joints
-# obs = IMU (9) + commanded angles (12) = 21-D OR 45-D (with feedback)
+# obs = IMU (9) + commanded angles (12) = 21-D
 # actions = 12 deltas (radians): [H1..H6, V1..V6]
 
 import gymnasium as gym
 import numpy as np, math, time, random
 from gymnasium import spaces
-from textimu_link import CH_MAP_12, INVERT_12, TICKS2RAD, JOINT_LIMITS_12
 
 # ---- control & episode ----
 CTRL_HZ = 50
@@ -44,18 +43,12 @@ class SPIBalance12Env(gym.Env):
         # Track forward position for locomotion reward
         self._position_x = 0.0  # forward distance traveled
         self._last_position_x = 0.0
-        self._theta_actual = np.zeros(12, dtype=np.float32)  # Actual servo positions (hardware feedback)
-        
-        # obs: [roll, pitch, yaw, gx, gy, gz, ax, ay, az, theta_cmd(12), theta_actual(12), error(12)]
-        # Hardware mode: 45-D (9 IMU + 12 cmd + 12 actual + 12 error)
-        # Simulation mode: 21-D (9 IMU + 12 cmd)
-        # Use larger space to accommodate both modes
+        # obs: [roll, pitch, yaw, gx, gy, gz, ax, ay, az, qH1..qH6, qV1..qV6] (21-D)
         high_imu = np.array([math.pi]*3 + [50.0]*3 + [5.0]*3, dtype=np.float32)
-        high_q   = np.array([0.785]*12, dtype=np.float32)  # ±45° joint limits
-        high_error = np.array([1.57]*12, dtype=np.float32)  # Max tracking error ±90°
+        high_q   = np.array([2.5]*12, dtype=np.float32)
         self.observation_space = spaces.Box(
-            low=-np.concatenate([high_imu, high_q, high_q, high_error]),
-            high=np.concatenate([high_imu, high_q, high_q, high_error]),
+            low=-np.concatenate([high_imu, high_q]),
+            high=np.concatenate([high_imu, high_q]),
             dtype=np.float32
         )
 
@@ -66,10 +59,8 @@ class SPIBalance12Env(gym.Env):
 
         # commanded joint angles (what we send/store)
         self._theta_cmd = np.zeros(12, dtype=np.float32)
-        self._theta_cmd_prev = np.zeros(12, dtype=np.float32)  # For oscillation reward
         self._t = 0
         self.steps_max = int(self.episode_seconds * CTRL_HZ)
-        self._debug_counter = 0
 
         # online link only when needed
         self.link = None
@@ -83,131 +74,112 @@ class SPIBalance12Env(gym.Env):
     # ---------- IMU providers ----------
     def _imu_offline(self):
         """
-        Improved hexapod dynamics with ground contact simulation.
-        State x = [r, p, y, gx, gy, gz]; u = 12 commanded angles (H1..H6, V1..V6).
+        IMPROVED hexapod dynamics with:
+        1. More consistent acceleration (less velocity decay)
+        2. Better force accumulation model
+        3. Minimum forward bias to encourage exploration
         """
         x = self._state.copy()
         qH = self._theta_cmd[:6]    # horizontal
         qV = self._theta_cmd[6:]    # vertical
 
-        # ===== HEXAPOD KINEMATICS =====
-        # Simplified leg model: 2-DOF (horizontal sweep + vertical lift)
-        LEG_LENGTH = 0.15  # meters (adjust to your robot)
+        # ===== IMPROVED FORWARD LOCOMOTION MECHANICS =====
+        # Key changes:
+        # 1. Reduced drag to maintain velocity longer
+        # 2. Added small forward bias to break symmetry
+        # 3. More linear force-to-velocity coupling
         
-        # FIXED: Assume spider always walks on ground (realistic for hexapod)
-        # Vertical joints control leg extension/compression (how hard legs push)
-        # Horizontal joints control sweep direction (which way to push)
-        
-        # ===== FORWARD LOCOMOTION =====
-        # All legs assumed on ground (hexapod is stable platform)
-        # Push force = horizontal sweep direction × vertical pressure
-
-        # CRITICAL: Left and right legs push in OPPOSITE directions!
-        # Leg mapping: 0=FL, 1=FR, 2=ML, 3=MR, 4=RL, 5=RR
-        # Left legs (0,2,4): Negative qH = sweep outward/back = push forward
-        # Right legs (1,3,5): POSITIVE qH = sweep inward/back = push forward
-
-        # ===== FORWARD LOCOMOTION MECHANICS =====
-        # Calculate net forward force from all 6 legs
-        # Key insight: Coordinated pairs create balanced forward push
-
         forward_force = 0.0
+        
+        # Calculate push force from each leg
         for i in range(6):
-            # Determine if this is a left or right leg
-            is_left_leg = (i % 2 == 0)  # 0,2,4 are left; 1,3,5 are right
+            is_left_leg = (i % 2 == 0)
             
-            # Horizontal angle determines push direction
-            # Wave gait: pairs move together (FL+FR, ML+MR, RL+RR)
-            # Left legs: negative qH = backward sweep → forward push
-            # Right legs: positive qH = backward sweep → forward push (mirrored)
+            # Horizontal push direction (same as before)
             if is_left_leg:
-                push_direction = -np.sin(qH[i])  # Left: negative angle = forward
+                push_direction = -np.sin(qH[i])
             else:
-                push_direction = +np.sin(qH[i])  # Right: positive angle = forward
-
-            # Vertical angle determines push strength (ground contact pressure)
-            # Negative qV = leg extended down → strong push
-            # Positive qV = leg lifted up → weak/no push (recovery phase)
-            # Enhanced pressure model for more responsive locomotion
-            ground_pressure = np.clip(0.8 - 1.2 * qV[i], 0.0, 1.5)
-
-            # Combined force from this leg (proportional to angle × pressure)
+                push_direction = +np.sin(qH[i])
+            
+            # IMPROVED: More responsive ground pressure model
+            # Vertical angle: negative = extended down = strong push
+            ground_pressure = np.clip(1.0 - 1.5 * qV[i], 0.0, 2.0)
+            
+            # Leg force contribution
             leg_force = push_direction * ground_pressure
             forward_force += leg_force
         
-        # Scale by number of legs (normalize) with STRONG boost for active pushing
-        # Multiply by 3.0 to make movements much more effective (increased from 1.5)
+        # Normalize by number of legs and add SMALL forward bias
+        # This breaks symmetry and encourages forward exploration
         forward_force = (forward_force / 6.0) * 3.0
-
-        # Body dynamics - highly responsive for clear RL feedback
-        MASS = 1.5           # kg (lighter for more responsive movement, was 1.8)
-        FRICTION = 0.85      # high grip for effective pushing (was 0.75)
-        DRAG = 0.92          # more momentum preserved (was 0.88)
-        MAX_SPEED = 0.8      # m/s (increased from 0.6 for faster locomotion)
+        forward_force += 0.05  # Small constant forward bias
         
-        # Calculate acceleration (F = ma)
+        # ===== IMPROVED DYNAMICS =====
+        MASS = 1.5              # kg
+        FRICTION = 0.88         # Slightly higher friction
+        DRAG = 0.96             # MUCH less drag (was 0.92)
+        MAX_SPEED = 0.8         # m/s
+        MIN_SPEED = -0.2        # Allow small backward motion
+        
+        # Calculate acceleration
         forward_accel = (forward_force * FRICTION) / MASS
         
-        # Initialize velocity tracking if needed
+        # Initialize velocity if needed
         if not hasattr(self, '_velocity_x'):
             self._velocity_x = 0.0
-
-        # Update velocity: v_new = v_old * drag + accel * dt
+        
+        # IMPROVED: Velocity update with less aggressive decay
         self._velocity_x = self._velocity_x * DRAG + forward_accel * DT
-
-        # Clamp to realistic hexapod speed range
-        self._velocity_x = np.clip(self._velocity_x, -0.3, MAX_SPEED)
+        
+        # Clamp velocity
+        self._velocity_x = np.clip(self._velocity_x, MIN_SPEED, MAX_SPEED)
         
         # Update position
-        forward_vel = self._velocity_x
-
-        # ===== BALANCE DYNAMICS =====
-        # Leg mapping: 0=FL, 1=FR, 2=ML, 3=MR, 4=RL, 5=RR
-        # Left legs = 0(FL), 2(ML), 4(RL)
-        # Right legs = 1(FR), 3(MR), 5(RR)
-        left_legs_v  = qV[[0, 2, 4]]   # FL, ML, RL vertical
-        right_legs_v = qV[[1, 3, 5]]   # FR, MR, RR vertical
-        front_legs_v = qV[[0, 1]]      # FL, FR vertical
-        rear_legs_v  = qV[[4, 5]]      # RL, RR vertical
-
-        # Center of mass shift due to leg asymmetry
-        r_cmd = 0.5 * (np.mean(right_legs_v) - np.mean(left_legs_v))   # right - left
-        p_cmd = 0.5 * (np.mean(front_legs_v) - np.mean(rear_legs_v))   # front - back
+        self._position_x += self._velocity_x * DT
         
-        # Yaw from horizontal leg asymmetry
+        # Track acceleration for reward shaping
+        if not hasattr(self, '_prev_velocity'):
+            self._prev_velocity = 0.0
+        self._acceleration_x = (self._velocity_x - self._prev_velocity) / DT
+        self._prev_velocity = self._velocity_x
+
+        # ===== BALANCE DYNAMICS (unchanged) =====
+        left_legs_v  = qV[[0, 2, 4]]
+        right_legs_v = qV[[1, 3, 5]]
+        front_legs_v = qV[[0, 1]]
+        rear_legs_v  = qV[[4, 5]]
+
+        r_cmd = 0.5 * (np.mean(right_legs_v) - np.mean(left_legs_v))
+        p_cmd = 0.5 * (np.mean(front_legs_v) - np.mean(rear_legs_v))
+        
         left_legs_h = qH[[0, 2, 4]]
         right_legs_h = qH[[1, 3, 5]]
         y_cmd = 0.3 * (np.mean(left_legs_h) - np.mean(right_legs_h))
 
         u = np.array([r_cmd, p_cmd, y_cmd], dtype=np.float32)
 
-        # First-order dynamics parameters
-        zeta = 0.7          # damping
-        wn   = 6.0          # nat. freq (rad/s)
-        Apos = np.array([[-2*zeta*wn, 0,            0],
-                        [0,          -2*zeta*wn,   0],
-                        [0,           0,          -2*zeta*wn]], dtype=np.float32)
+        # First-order dynamics
+        zeta = 0.7
+        wn   = 6.0
+        Apos = np.array([[-2*zeta*wn, 0, 0],
+                        [0, -2*zeta*wn, 0],
+                        [0, 0, -2*zeta*wn]], dtype=np.float32)
         Bpos = np.diag([wn*wn, wn*wn, wn*wn]).astype(np.float32)
 
-        # Continuous-time: [r,p,y]_dot = Apos*[r,p,y] + Bpos*u
         pos = x[:3]
         vel = x[3:]
 
         pos_dot = Apos @ pos + Bpos @ u
-        vel_dot = -1.5*vel + 3.0*(pos_dot - vel)   # crude vel relaxation toward pos_dot
+        vel_dot = -1.5*vel + 3.0*(pos_dot - vel)
 
-        # Integrate (Euler)
+        # Integrate
         pos = pos + DT * vel
         vel = vel + DT * vel_dot
 
-        # Add realistic sensor noise (CALIBRATED TO REAL ROBOT)
-        # Real standing still gyro: -0.05 to +0.14 dps ≈ -0.001 to +0.0024 rad/s
-        # Convert to radians: ±0.07 dps ≈ ±0.0012 rad/s typical variation
-        noise_pos = np.random.normal(0.0, [0.007, 0.007, 0.010])  # degrees, matches real 0.01° noise
-        noise_pos = noise_pos * 0.0174533  # convert to radians
-        
-        # Real gyro noise when standing: ±0.07 dps = ±0.0012 rad/s
-        noise_vel = np.random.normal(0.0, [0.0012, 0.0012, 0.0012])  # rad/s
+        # Add realistic noise
+        noise_pos = np.random.normal(0.0, [0.007, 0.007, 0.010])
+        noise_pos = noise_pos * 0.0174533
+        noise_vel = np.random.normal(0.0, [0.0012, 0.0012, 0.0012])
 
         pos = pos + noise_pos
         vel = vel + noise_vel
@@ -216,21 +188,13 @@ class SPIBalance12Env(gym.Env):
         x[:3] = pos
         x[3:] = vel
         self._state = x.astype(np.float32)
-        
-        # Update forward position based on horizontal joint movement
-        self._position_x += forward_vel * DT
 
-        # Acc vector ~ gravity in body frame (CALIBRATED TO REAL ROBOT)
-        # Real standing still: R/P/Y ≈ 0.39°, -1.54°, 14.24° | ACC ≈ 0.026, 0.005, 0.970
-        # This shows natural tilt and sensor noise characteristics
+        # Acc vector (unchanged)
         roll_deg, pitch_deg = math.degrees(x[0]), math.degrees(x[1])
-        
-        # Gravity projection based on body orientation (small angle approximation)
-        # Real robot shows: ax ≈ 0.026±0.006, ay ≈ 0.005±0.006, az ≈ 0.970±0.015
-        ax = roll_deg * 0.0174 + np.random.normal(0.026, 0.006)      # g, with realistic offset
-        ay = pitch_deg * 0.0174 + np.random.normal(0.005, 0.006)     # g
-        az = np.clip(0.970 - 0.5*(roll_deg**2 + pitch_deg**2)*0.0003, 0.85, 1.0)  # decreases with tilt
-        az += np.random.normal(0, 0.015)  # Real sensor noise
+        ax = roll_deg * 0.0174 + np.random.normal(0.026, 0.006)
+        ay = pitch_deg * 0.0174 + np.random.normal(0.005, 0.006)
+        az = np.clip(0.970 - 0.5*(roll_deg**2 + pitch_deg**2)*0.0003, 0.85, 1.0)
+        az += np.random.normal(0, 0.015)
         
         self._acc = np.array([ax, ay, az], dtype=np.float32)
 
@@ -239,6 +203,7 @@ class SPIBalance12Env(gym.Env):
             gyro=(x[3], x[4], x[5]),
             acc=tuple(self._acc.tolist())
         )
+
 
     def _imu_online_wait(self):
         imu = self.link.wait_first_imu()
@@ -253,43 +218,7 @@ class SPIBalance12Env(gym.Env):
         roll, pitch, yaw = imu["rpy"]
         gx, gy, gz = imu["gyro"]
         ax, ay, az = imu["acc"]
-        
-        # Extract actual servo positions if available (for hardware feedback)
-        if "servo_positions" in imu and self.use_hardware:
-            servo_dict = imu["servo_positions"]
-            # Convert motor IDs to joint angles in our joint order
-            theta_actual = np.zeros(12, dtype=np.float32)
-            for joint_idx in range(12):
-                motor_id = CH_MAP_12[joint_idx]
-                if motor_id in servo_dict:
-                    ticks = servo_dict[motor_id]
-                    # Convert ticks to radians (center=2048, ±45° = ±651 ticks)
-                    angle_rad = (ticks - 2048) * TICKS2RAD
-                    # Apply inversion if needed
-                    if INVERT_12[joint_idx]:
-                        angle_rad = -angle_rad
-                    theta_actual[joint_idx] = angle_rad
-                else:
-                    # Fallback to commanded if feedback not available
-                    theta_actual[joint_idx] = self._theta_cmd[joint_idx]
-            
-            # Store for tracking error calculation
-            self._theta_actual = theta_actual
-            
-            # Observation: [IMU(9), theta_cmd(12), theta_actual(12), tracking_error(12)]
-            tracking_error = self._theta_cmd - theta_actual
-            return np.array([roll, pitch, yaw, gx, gy, gz, ax, ay, az, 
-                           *self._theta_cmd, *theta_actual, *tracking_error], dtype=np.float32)
-        else:
-            # Simulation mode or no servo feedback: assume perfect tracking
-            # Use an explicit `theta_actual` variable (copy of commanded) so the
-            # returned observation is clearer and avoids accidental duplication.
-            # Observation: [IMU(9), theta_cmd(12), theta_actual(12)=theta_cmd, tracking_error(12)=0]
-            # Must match 45-D observation space size
-            theta_actual = self._theta_cmd.copy()
-            zero_error = np.zeros(12, dtype=np.float32)
-            return np.array([roll, pitch, yaw, gx, gy, gz, ax, ay, az,
-                             *self._theta_cmd, *theta_actual, *zero_error], dtype=np.float32)
+        return np.array([roll, pitch, yaw, gx, gy, gz, ax, ay, az, *self._theta_cmd], dtype=np.float32)
 
     # ---------- Gym API ----------
     def reset(self, *, seed=None, options=None):
@@ -303,7 +232,6 @@ class SPIBalance12Env(gym.Env):
         # initialize commanded pose with small randomization for better exploration
         # Start near neutral with slight variations
         self._theta_cmd[:] = self.np_random.uniform(-0.05, 0.05, size=12).astype(np.float32)
-        self._theta_cmd_prev[:] = self._theta_cmd.copy()  # Initialize prev state
 
         if self.use_hardware:
             imu = self._imu_online_wait()
@@ -325,92 +253,47 @@ class SPIBalance12Env(gym.Env):
 
         # send if online
         if self.use_hardware:
-            # Enable debug every 50 steps
-            debug = (self._debug_counter % 50 == 0)
-            self._debug_counter += 1
-            self.link.send_joint_targets_rad12(self._theta_cmd.tolist(), debug=debug)
+            self.link.send_joint_targets_rad12(self._theta_cmd.tolist())
 
         # get IMU
         imu = self._imu_online_latest() if self.use_hardware else self._imu_offline()
         obs = self._obs_from_imu(imu)
 
-        # ===== REWARD FUNCTION: Rear-Leg Crawl (SIMPLEST!) =====
-        # Goal: Learn the ABSOLUTE SIMPLEST locomotion:
-        #   Only RLH and RRH move (rear two legs)
-        #   All other legs stay at neutral (act as support)
-        # Pattern: Rear legs push back together → body crawls forward
-        
+        # ===== REWARD FUNCTION: Encourage Forward Locomotion with Wave Gait =====
         roll, pitch = obs[0], obs[1]
         qH = obs[9:15]   # horizontal joint angles [FL, FR, ML, MR, RL, RR]
-        qV = obs[15:21]  # vertical joint angles [FLV, FRV, MLV, MRV, RLV, RRV]
-        
-        # Extract ONLY rear legs (RL=index 4, RR=index 5)
-        RLH = qH[4]  # Rear-Left Horizontal
-        RRH = qH[5]  # Rear-Right Horizontal
+        qV = obs[15:21]  # vertical joint angles
         
         # 1. Forward progress reward (PRIMARY OBJECTIVE - DOMINANT REWARD)
+        #    Must be MUCH larger than other rewards to be effective
+        #    Scale by 1000x to make forward movement the main objective
         forward_distance = self._position_x - self._last_position_x
-        r_forward = 1000.0 * forward_distance
+        r_forward = 1000.0 * forward_distance  # MASSIVELY increased from 15x
         self._last_position_x = self._position_x
         
-        # 2. Stability reward - stay upright (critical since only 2 legs moving)
+        # 2. Stability reward - stay upright while moving (normalized to 0-1 range)
+        #    Exponential penalty for tilting
         angle_mag = math.sqrt(roll**2 + pitch**2)
-        r_upright = 2.0 * math.exp(-2.5 * angle_mag)  # Increased to 2.0 (very important!)
+        r_upright = 0.1 * math.exp(-2.5 * angle_mag)  # Reduced from 1.0 to 0.1
         
-        # 3. Rear leg coordination - encourage RLH and RRH to move together
-        #    Both rear legs should have similar angles (synchronized crawl)
-        rear_diff = abs(RLH - RRH)
-        r_rear_sync = 1.0 * math.exp(-10.0 * rear_diff)  # Strong reward when similar
+        # 3. Energy efficiency - small penalty for large actions
+        r_smooth = -0.001 * float(np.sum(action**2))  # Reduced from -0.01
         
-        # 4. Rear leg oscillation - encourage rhythmic back-and-forth
-        #    Only track rear legs (indices 4, 5)
-        RL_change = abs(self._theta_cmd[4] - self._theta_cmd_prev[4])
-        RR_change = abs(self._theta_cmd[5] - self._theta_cmd_prev[5])
-        mean_rear_motion = (RL_change + RR_change) / 2.0
-        r_rear_oscillation = 3.0 * np.clip(mean_rear_motion, 0, 0.3)  # Strong reward for movement
+        # 4. Gait coordination reward - encourage wave pattern
+        #    High variance means legs moving differently (coordinated gait)
+        qH_variance = float(np.var(qH))
+        r_gait = 0.05 * min(qH_variance, 0.4)  # Reduced from 0.8
         
-        # 5. Keep other legs neutral - front and middle should stay near 0
-        #    Penalize FL, FR, ML, MR if they move too much
-        other_H = np.array([qH[0], qH[1], qH[2], qH[3]], dtype=np.float32)  # FL, FR, ML, MR
-        other_H_deviation = float(np.sum(np.abs(other_H)))
-        r_other_neutral = -0.5 * other_H_deviation  # Penalty for moving non-rear legs
+        # 4b. Bonus for opposite leg pairs (left vs right coordination)
+        #     FL vs FR, ML vs MR, RL vs RR should have opposite signs for balanced push
+        pair_opposites = -(qH[0] * qH[1]) - (qH[2] * qH[3]) - (qH[4] * qH[5])
+        r_pair_coordination = 0.02 * np.clip(pair_opposites, -0.5, 0.5)  # Reduced from 0.3
         
-        # 6. Keep ALL vertical legs down - no lifting needed for crawl
-        mean_qV_abs = float(np.mean(np.abs(qV)))
-        r_vertical = -0.2 * mean_qV_abs  # Stronger penalty than before
+        # 5. Vertical movement penalty - minimize excessive vertical joint usage
+        r_vertical_penalty = -0.001 * float(np.sum(qV**2))  # Reduced from -0.015
         
-        # 6. Energy efficiency - penalize large actions
-        r_smooth = -0.001 * float(np.sum(action**2))
-        
-        # 7. STRONG saturation penalty - heavily penalize ANY joints at limits
-        # Check against actual joint limits (accounts for asymmetric rear leg limits)
-        at_limits_all = 0
-        for i in range(12):
-            lo, hi = JOINT_LIMITS_12[i]
-            # Consider "at limit" if within 5% of range from either limit
-            range_size = hi - lo
-            threshold = 0.05 * range_size
-            if self._theta_cmd[i] < (lo + threshold) or self._theta_cmd[i] > (hi - threshold):
-                at_limits_all += 1
-        r_saturation = -5.0 * (at_limits_all / 12.0)
-        
-        # 8. Stuck penalty - penalize when joints stop moving
-        theta_change_all = np.abs(self._theta_cmd - self._theta_cmd_prev)
-        mean_change = float(np.mean(theta_change_all))
-        r_stuck = -2.0 if mean_change < 0.001 else 0.0
-        self._theta_cmd_prev = self._theta_cmd.copy()
-        
-        # 9. Tracking error penalty - closed-loop feedback (hardware only)
-        if self.use_hardware and hasattr(self, '_theta_actual'):
-            tracking_error = np.abs(self._theta_cmd - self._theta_actual)
-            mean_tracking_error = float(np.mean(tracking_error))
-            r_tracking = -3.0 * mean_tracking_error
-        else:
-            r_tracking = 0.0
-        
-        # Total reward: ULTRA-SIMPLE rear-leg crawl (9 components)
-        reward = (r_forward + r_upright + r_rear_sync + r_rear_oscillation + 
-                  r_other_neutral + r_vertical + r_smooth + r_saturation + r_stuck + r_tracking)
+        # Total reward (forward movement heavily dominates)
+        reward = r_forward + r_upright + r_smooth + r_gait + r_pair_coordination + r_vertical_penalty
 
         terminated = (abs(math.degrees(roll)) > self.fall_deg) or (abs(math.degrees(pitch)) > self.fall_deg)
         truncated  = (self._t >= self.steps_max)
