@@ -44,15 +44,15 @@ def main():
     eval_cb = EvalCallback(eval_venv, best_model_save_path="./runs/best/",
                            log_path="./runs/eval/", eval_freq=10_000,
                            deterministic=True, render=False)
-    ckpt_cb = CheckpointCallback(save_freq=50_000, save_path="./runs/ckpt/", name_prefix="ppo_rear_crawl")
+    ckpt_cb = CheckpointCallback(save_freq=50_000, save_path="./runs/ckpt/", name_prefix="ppo_front_crawl")
 
-    # Reduced timesteps - rear-leg crawl is ULTRA simple!
+    # Reduced timesteps - front-leg crawl is ULTRA simple!
     model.learn(total_timesteps=300_000, callback=[eval_cb, ckpt_cb])
 
     # Save model & normalization stats
-    model.save("./runs/final/ppo_rear_crawl_offline")
+    model.save("./runs/final/ppo_front_crawl_offline")
     train_venv.save("./runs/final/vecnorm.pkl")
-    print("\n✅ Training complete! Model saved to ./runs/final/ppo_rear_crawl_offline.zip")
+    print("\n✅ Training complete! Model saved to ./runs/final/ppo_front_crawl_offline.zip")
 
     train_venv.close(); eval_venv.close()
 

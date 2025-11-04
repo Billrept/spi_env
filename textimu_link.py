@@ -14,12 +14,12 @@ RAD2TICKS = 1.0 / TICKS2RAD
 # Real joint limits (radians). Center at 180° (2048 ticks) ± angle
 # Horizontal: FL, FR, ML, MR, RL, RR
 JOINT_LIMITS_H = [
-    (-0.785, 0.785),  # FLH: ±45°
-    (-0.785, 0.785),  # FRH: ±45°
-    (-0.785, 0.785),  # MLH: ±45°
-    (-0.785, 0.785),  # MRH: ±45°
-    (-1, 0.785),  
-    (-0.785, 1), 
+    (-1.2, 1.2),      # FLH: ±69° (extended for front-leg crawl)
+    (-1.2, 1.2),      # FRH: ±69° (extended for front-leg crawl)
+    (-0.785, 0.785),  # MLH: ±45° (unused, kept at neutral)
+    (-0.785, 0.785),  # MRH: ±45° (unused, kept at neutral)
+    (-1, 0.785),      # RLH: asymmetric (unused)
+    (-0.785, 1),      # RRH: asymmetric (unused)
 ]
 JOINT_LIMITS_V = [(-0.785, 0.785)] * 6  # ±45° from center (135° to 225°)
 JOINT_LIMITS_12 = JOINT_LIMITS_H + JOINT_LIMITS_V

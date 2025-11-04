@@ -21,8 +21,8 @@ FALL_DEG = 60.0  # More lenient fall threshold for better learning
 MAX_STEP_RAD_H = 0.05
 MAX_STEP_RAD_V = 0.05
 
-# real joint limits (safety clamp); center at 180° (2048 ticks) ± 45°
-JOINT_LIMITS_12 = [(-0.785, 0.785)] * 12  # ±45° from center (135° to 225°)
+# Joint limits imported from textimu_link (front legs have extended range)
+# JOINT_LIMITS_12 is defined in textimu_link.py
 
 class SPIBalance12Env(gym.Env):
     metadata = {"render_modes": []}
@@ -33,35 +33,36 @@ class SPIBalance12Env(gym.Env):
         self.use_hardware = use_hardware
         self.port = port
         self.np_random, _ = gym.utils.seeding.np_random(seed)
-        
+
         # Override episode duration and fall threshold if provided
         self.episode_seconds = episode_seconds if episode_seconds is not None else EPISODE_SECONDS
         self.fall_deg = max_tilt_deg if max_tilt_deg is not None else FALL_DEG
         
         self._state = np.zeros(6, dtype=np.float32)  # [roll, pitch, yaw, gx, gy, gz]
         self._acc   = np.array([0.0, 0.0, 1.0], dtype=np.float32)
-        
+
         # Track forward position for locomotion reward
         self._position_x = 0.0  # forward distance traveled
         self._last_position_x = 0.0
         self._theta_actual = np.zeros(12, dtype=np.float32)  # Actual servo positions (hardware feedback)
         
-        # obs: [roll, pitch, yaw, gx, gy, gz, ax, ay, az, theta_cmd(12), theta_actual(12), error(12)]
-        # Hardware mode: 45-D (9 IMU + 12 cmd + 12 actual + 12 error)
-        # Simulation mode: 21-D (9 IMU + 12 cmd)
-        # Use larger space to accommodate both modes
+        # obs: REDUCED to only front legs + vertical (hide other horizontal from policy!)
+        # [IMU(9), FLH, FRH, ALL_VERTICAL(6), FLH_actual, FRH_actual, FLH_error, FRH_error]
+        # Total: 9 + 2 + 6 + 2 + 2 = 21-D 
         high_imu = np.array([math.pi]*3 + [50.0]*3 + [5.0]*3, dtype=np.float32)
-        high_q   = np.array([0.785]*12, dtype=np.float32)  # ±45° joint limits
-        high_error = np.array([1.57]*12, dtype=np.float32)  # Max tracking error ±90°
+        high_front_H = np.array([1.2]*2, dtype=np.float32)  # FLH, FRH: ±69° extended range
+        high_all_V = np.array([0.785]*6, dtype=np.float32)     # All 6 vertical: ±45°
+        high_front_error = np.array([2.4]*2, dtype=np.float32)  # FLH, FRH tracking error (2x range)
         self.observation_space = spaces.Box(
-            low=-np.concatenate([high_imu, high_q, high_q, high_error]),
-            high=np.concatenate([high_imu, high_q, high_q, high_error]),
+            low=-np.concatenate([high_imu, high_front_H, high_all_V, high_front_H, high_front_error]),
+            high=np.concatenate([high_imu, high_front_H, high_all_V, high_front_H, high_front_error]),
             dtype=np.float32
         )
 
-        # actions: 12 deltas (H first, then V)
-        low  = np.array([-MAX_STEP_RAD_H]*6 + [-MAX_STEP_RAD_V]*6, dtype=np.float32)
-        high = np.array([+MAX_STEP_RAD_H]*6 + [+MAX_STEP_RAD_V]*6, dtype=np.float32)
+        # actions: 8 deltas (only FLH, FRH + 6 vertical joints)
+        # [FLH, FRH, FLV, FRV, MLV, MRV, RLV, RRV]
+        low  = np.array([-MAX_STEP_RAD_H]*2 + [-MAX_STEP_RAD_V]*6, dtype=np.float32)
+        high = np.array([+MAX_STEP_RAD_H]*2 + [+MAX_STEP_RAD_V]*6, dtype=np.float32)
         self.action_space = spaces.Box(low, high, dtype=np.float32)
 
         # commanded joint angles (what we send/store)
@@ -85,10 +86,18 @@ class SPIBalance12Env(gym.Env):
         """
         Improved hexapod dynamics with ground contact simulation.
         State x = [r, p, y, gx, gy, gz]; u = 12 commanded angles (H1..H6, V1..V6).
+        
+        FRONT-LEG CRAWL MODE: Only FLH and FRH contribute to physics!
+        Middle and rear horizontal joints are ZEROED in simulation.
         """
         x = self._state.copy()
-        qH = self._theta_cmd[:6]    # horizontal
+        qH = self._theta_cmd[:6].copy()    # horizontal [FLH, FRH, MLH, MRH, RLH, RRH]
         qV = self._theta_cmd[6:]    # vertical
+
+        qH[2] = 0.0  # MLH = 0
+        qH[3] = 0.0  # MRH = 0
+        qH[4] = 0.0  # RLH = 0
+        qH[5] = 0.0  # RRH = 0
 
         # ===== HEXAPOD KINEMATICS =====
         # Simplified leg model: 2-DOF (horizontal sweep + vertical lift)
@@ -140,10 +149,10 @@ class SPIBalance12Env(gym.Env):
         forward_force = (forward_force / 6.0) * 3.0
 
         # Body dynamics - highly responsive for clear RL feedback
-        MASS = 1.5           # kg (lighter for more responsive movement, was 1.8)
+        MASS = 1.0
         FRICTION = 0.85      # high grip for effective pushing (was 0.75)
         DRAG = 0.92          # more momentum preserved (was 0.88)
-        MAX_SPEED = 0.8      # m/s (increased from 0.6 for faster locomotion)
+        MAX_SPEED = 0.84      # m/s (increased from 0.6 for faster locomotion)
         
         # Calculate acceleration (F = ma)
         forward_accel = (forward_force * FRICTION) / MASS
@@ -173,7 +182,7 @@ class SPIBalance12Env(gym.Env):
         # Center of mass shift due to leg asymmetry
         r_cmd = 0.5 * (np.mean(right_legs_v) - np.mean(left_legs_v))   # right - left
         p_cmd = 0.5 * (np.mean(front_legs_v) - np.mean(rear_legs_v))   # front - back
-        
+
         # Yaw from horizontal leg asymmetry
         left_legs_h = qH[[0, 2, 4]]
         right_legs_h = qH[[1, 3, 5]]
@@ -273,23 +282,39 @@ class SPIBalance12Env(gym.Env):
                     # Fallback to commanded if feedback not available
                     theta_actual[joint_idx] = self._theta_cmd[joint_idx]
             
-            # Store for tracking error calculation
+            # Store for tracking error calculation (but IGNORE ML/MR/RL/RR actual values!)
             self._theta_actual = theta_actual
             
-            # Observation: [IMU(9), theta_cmd(12), theta_actual(12), tracking_error(12)]
-            tracking_error = self._theta_cmd - theta_actual
-            return np.array([roll, pitch, yaw, gx, gy, gz, ax, ay, az, 
-                           *self._theta_cmd, *theta_actual, *tracking_error], dtype=np.float32)
+            # Extract horizontal and vertical components
+            qH = self._theta_cmd[0::2]  # Horizontal: [FLH, FRH, MLH, MRH, RLH, RRH]
+            qV = self._theta_cmd[1::2]  # Vertical: [FLV, FRV, MLV, MRV, RLV, RRV]
+            
+            # FRONT-LEG CRAWL: Only use actual feedback for FLH and FRH
+            # For tracking error calculation, use commanded values for all other joints
+            qH_actual = theta_actual[0::2]  # [FLH_actual, FRH_actual, MLH_actual, MRH_actual, RLH_actual, RRH_actual]
+            qV_actual = theta_actual[1::2]  # All 6 vertical actual values
+            
+            # Observation (21-D): [IMU(9), FLH, FRH, V(6), FLH_actual, FRH_actual, FLH_error, FRH_error]
+            # Only expose front horizontal joints (FLH, FRH) at indices 0,1
+            tracking_error_front = qH[:2] - qH_actual[:2]  # Only FLH and FRH tracking error
+            return np.array([roll, pitch, yaw, gx, gy, gz, ax, ay, az,
+                           qH[0], qH[1],           # FLH, FRH commanded
+                           *qV,                    # All 6 vertical joints
+                           qH_actual[0], qH_actual[1],  # FLH, FRH actual
+                           *tracking_error_front], dtype=np.float32)  # FLH, FRH tracking error
         else:
             # Simulation mode or no servo feedback: assume perfect tracking
-            # Use an explicit `theta_actual` variable (copy of commanded) so the
-            # returned observation is clearer and avoids accidental duplication.
-            # Observation: [IMU(9), theta_cmd(12), theta_actual(12)=theta_cmd, tracking_error(12)=0]
-            # Must match 45-D observation space size
-            theta_actual = self._theta_cmd.copy()
-            zero_error = np.zeros(12, dtype=np.float32)
+            qH = self._theta_cmd[0::2]  # Horizontal: [FLH, FRH, MLH, MRH, RLH, RRH]
+            qV = self._theta_cmd[1::2]  # Vertical: [FLV, FRV, MLV, MRV, RLV, RRV]
+            
+            # Observation (21-D): [IMU(9), FLH, FRH, V(6), FLH_actual, FRH_actual, FLH_error, FRH_error]
+            # Zero tracking error in simulation
+            zero_error_front = np.zeros(2, dtype=np.float32)
             return np.array([roll, pitch, yaw, gx, gy, gz, ax, ay, az,
-                             *self._theta_cmd, *theta_actual, *zero_error], dtype=np.float32)
+                             qH[0], qH[1],           # FLH, FRH commanded
+                             *qV,                    # All 6 vertical joints
+                             qH[0], qH[1],           # FLH, FRH actual (same as commanded)
+                             *zero_error_front], dtype=np.float32)  # FLH, FRH tracking error (zero)
 
     # ---------- Gym API ----------
     def reset(self, *, seed=None, options=None):
@@ -315,8 +340,18 @@ class SPIBalance12Env(gym.Env):
         return self._obs_from_imu(imu), {}
 
     def step(self, action):
+        # action is 8-D: [FLH, FRH, FLV, FRV, MLV, MRV, RLV, RRV]
         action = np.clip(action, self.action_space.low, self.action_space.high)
-        theta  = self._theta_cmd + action
+        
+        # Map 8-D actions to 12-D joint deltas
+        # Joint order: [FLH, FRH, MLH, MRH, RLH, RRH, FLV, FRV, MLV, MRV, RLV, RRV]
+        action_12 = np.zeros(12, dtype=np.float32)
+        action_12[0] = action[0]  # FLH
+        action_12[1] = action[1]  # FRH
+        # action_12[2:6] remain 0.0 (MLH, MRH, RLH, RRH frozen)
+        action_12[6:12] = action[2:8]  # All 6 vertical joints
+        
+        theta = self._theta_cmd + action_12
 
         # clamp to hard limits
         for i, (lo, hi) in enumerate(JOINT_LIMITS_12):
@@ -334,19 +369,19 @@ class SPIBalance12Env(gym.Env):
         imu = self._imu_online_latest() if self.use_hardware else self._imu_offline()
         obs = self._obs_from_imu(imu)
 
-        # ===== REWARD FUNCTION: Rear-Leg Crawl (SIMPLEST!) =====
+        # ===== REWARD FUNCTION: Front-Leg Crawl (SIMPLEST!) =====
         # Goal: Learn the ABSOLUTE SIMPLEST locomotion:
-        #   Only RLH and RRH move (rear two legs)
+        #   Only FLH and FRH move (front two legs)
         #   All other legs stay at neutral (act as support)
-        # Pattern: Rear legs push back together → body crawls forward
+        # Pattern: Front legs pull forward together → body crawls forward
         
         roll, pitch = obs[0], obs[1]
-        qH = obs[9:15]   # horizontal joint angles [FL, FR, ML, MR, RL, RR]
-        qV = obs[15:21]  # vertical joint angles [FLV, FRV, MLV, MRV, RLV, RRV]
-        
-        # Extract ONLY rear legs (RL=index 4, RR=index 5)
-        RLH = qH[4]  # Rear-Left Horizontal
-        RRH = qH[5]  # Rear-Right Horizontal
+        # Observation now only exposes FLH, FRH in horizontal
+        # obs[9:11] = [FLH, FRH] commanded
+        # obs[11:17] = all 6 vertical joints
+        FLH = obs[9]   # Front-Left Horizontal
+        FRH = obs[10]  # Front-Right Horizontal
+        qV = obs[11:17]  # vertical joint angles [FLV, FRV, MLV, MRV, RLV, RRV]
         
         # 1. Forward progress reward (PRIMARY OBJECTIVE - DOMINANT REWARD)
         forward_distance = self._position_x - self._last_position_x
@@ -357,23 +392,18 @@ class SPIBalance12Env(gym.Env):
         angle_mag = math.sqrt(roll**2 + pitch**2)
         r_upright = 2.0 * math.exp(-2.5 * angle_mag)  # Increased to 2.0 (very important!)
         
-        # 3. Rear leg coordination - encourage RLH and RRH to move together
-        #    Both rear legs should have similar angles (synchronized crawl)
-        rear_diff = abs(RLH - RRH)
-        r_rear_sync = 1.0 * math.exp(-10.0 * rear_diff)  # Strong reward when similar
+        # 3. Front leg coordination - encourage FLH and FRH to move together
+        #    Both front legs should have similar angles (synchronized crawl)
+        front_diff = abs(FLH - FRH)
+        r_front_sync = 1.0 * math.exp(-10.0 * front_diff)  # Strong reward when similar
         
-        # 4. Rear leg oscillation - encourage rhythmic back-and-forth
-        #    Only track rear legs (indices 4, 5)
-        RL_change = abs(self._theta_cmd[4] - self._theta_cmd_prev[4])
-        RR_change = abs(self._theta_cmd[5] - self._theta_cmd_prev[5])
-        mean_rear_motion = (RL_change + RR_change) / 2.0
-        r_rear_oscillation = 3.0 * np.clip(mean_rear_motion, 0, 0.3)  # Strong reward for movement
+        # 4. Front leg oscillation - encourage rhythmic back-and-forth
+        #    Only track front legs (indices 0, 1 in full theta_cmd)
+        FL_change = abs(self._theta_cmd[0] - self._theta_cmd_prev[0])
+        FR_change = abs(self._theta_cmd[1] - self._theta_cmd_prev[1])
+        mean_front_motion = (FL_change + FR_change) / 2.0
+        r_front_oscillation = 3.0 * np.clip(mean_front_motion, 0, 0.3)  # Strong reward for movement
         
-        # 5. Keep other legs neutral - front and middle should stay near 0
-        #    Penalize FL, FR, ML, MR if they move too much
-        other_H = np.array([qH[0], qH[1], qH[2], qH[3]], dtype=np.float32)  # FL, FR, ML, MR
-        other_H_deviation = float(np.sum(np.abs(other_H)))
-        r_other_neutral = -0.5 * other_H_deviation  # Penalty for moving non-rear legs
         
         # 6. Keep ALL vertical legs down - no lifting needed for crawl
         mean_qV_abs = float(np.mean(np.abs(qV)))
@@ -394,10 +424,13 @@ class SPIBalance12Env(gym.Env):
                 at_limits_all += 1
         r_saturation = -5.0 * (at_limits_all / 12.0)
         
-        # 8. Stuck penalty - penalize when joints stop moving
-        theta_change_all = np.abs(self._theta_cmd - self._theta_cmd_prev)
-        mean_change = float(np.mean(theta_change_all))
-        r_stuck = -2.0 if mean_change < 0.001 else 0.0
+        # 8. Stuck penalty - penalize when ACTIVE joints stop moving
+        #    Only check FLH, FRH (indices 0,1) + all vertical (indices 6-11)
+        active_joints = np.concatenate([self._theta_cmd[0:2], self._theta_cmd[6:12]])
+        active_joints_prev = np.concatenate([self._theta_cmd_prev[0:2], self._theta_cmd_prev[6:12]])
+        active_change = np.abs(active_joints - active_joints_prev)
+        mean_active_change = float(np.mean(active_change))
+        r_stuck = -2.0 if mean_active_change < 0.001 else 0.0
         self._theta_cmd_prev = self._theta_cmd.copy()
         
         # 9. Tracking error penalty - closed-loop feedback (hardware only)
@@ -408,9 +441,9 @@ class SPIBalance12Env(gym.Env):
         else:
             r_tracking = 0.0
         
-        # Total reward: ULTRA-SIMPLE rear-leg crawl (9 components)
-        reward = (r_forward + r_upright + r_rear_sync + r_rear_oscillation + 
-                  r_other_neutral + r_vertical + r_smooth + r_saturation + r_stuck + r_tracking)
+        # Total reward: ULTRA-SIMPLE front-leg crawl (9 components)
+        reward = (r_forward + r_upright + r_front_sync + r_front_oscillation + 
+                  r_vertical + r_smooth + r_saturation + r_stuck + r_tracking)
 
         terminated = (abs(math.degrees(roll)) > self.fall_deg) or (abs(math.degrees(pitch)) > self.fall_deg)
         truncated  = (self._t >= self.steps_max)
