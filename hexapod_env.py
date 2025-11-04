@@ -337,13 +337,20 @@ class SPIBalance12Env(gym.Env):
         r_oscillation = 0.3 * float(np.mean(theta_change_middle))
         self._theta_cmd_prev = self._theta_cmd.copy()
         
-        # 8. Saturation penalty - penalize if middle legs are stuck at limits
-        at_limits_middle = (np.abs(self._theta_cmd[2:4]) > 0.735).sum()  # MLH, MRH
-        r_saturation = -1.0 * (at_limits_middle / 2.0)  # -1 if both at limits
+        # 8. STRONG saturation penalty - heavily penalize ANY joints at limits
+        #    Check ALL 12 joints, not just middle legs
+        at_limits_all = (np.abs(self._theta_cmd) > 0.75).sum()  # Count all saturated joints
+        r_saturation = -5.0 * (at_limits_all / 12.0)  # Max penalty: -5.0 if all joints saturated
         
-        # Total reward: Forward movement + middle leg coordination + avoid saturation
+        # 9. Stuck penalty - penalize when joints stop moving entirely
+        #    If mean change across ALL joints is near zero, heavily penalize
+        theta_change_all = np.abs(self._theta_cmd - self._theta_cmd_prev)
+        mean_change = float(np.mean(theta_change_all))
+        r_stuck = -2.0 if mean_change < 0.001 else 0.0  # -2.0 if completely stuck
+        
+        # Total reward: Forward movement + middle leg coordination + avoid saturation + avoid stuck
         reward = (r_forward + r_upright + r_middle_coord + r_lift + 
-                  r_other_penalty + r_smooth + r_oscillation + r_saturation)
+                  r_other_penalty + r_smooth + r_oscillation + r_saturation + r_stuck)
 
         terminated = (abs(math.degrees(roll)) > self.fall_deg) or (abs(math.degrees(pitch)) > self.fall_deg)
         truncated  = (self._t >= self.steps_max)
