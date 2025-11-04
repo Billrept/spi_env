@@ -2,7 +2,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from hexapod_env import SPIBalance12Env
 
-MODEL_PATH = "./runs/final/ppo_tripod_offline"
+MODEL_PATH = "./runs/final/ppo_simple_offline"
 VEC_PATH   = "./runs/final/vecnorm.pkl"
 SERIAL_PORT = "COM3"   # set your port
 

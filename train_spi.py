@@ -15,17 +15,17 @@ def main():
     # This is REQUIRED - the policy must be deployed with the same normalization!
     train_venv = VecNormalize(train_venv, norm_obs=True, norm_reward=False, clip_obs=10.0)
 
-    # Hyperparameters optimized for tripod gait (simpler coordination than middle-leg gait)
+    # Hyperparameters optimized for simple push-pull gait (EASIEST gait - no phase coordination)
     model = PPO(
         "MlpPolicy", 
         train_venv, 
-        learning_rate=5e-4,      # Increased: simpler reward landscape allows faster learning
+        learning_rate=5e-4,      # Fast learning for simple synchronized movement
         n_steps=2048,            # Keep: good balance for 10s episodes (500 steps)
-        batch_size=64,           # Reduced: smaller batches = more frequent updates
-        gamma=0.99,              # Keep: standard discount for locomotion
-        gae_lambda=0.95,         # Keep: standard advantage estimation
-        clip_range=0.2,          # Keep: standard PPO clipping
-        ent_coef=0.05,           # Increased: more exploration to discover tripod pattern
+        batch_size=64,           # Smaller batches = more frequent updates
+        gamma=0.99,              # Standard discount for locomotion
+        gae_lambda=0.95,         # Standard advantage estimation
+        clip_range=0.2,          # Standard PPO clipping
+        ent_coef=0.03,           # Lower entropy - simpler pattern, less exploration needed
         vf_coef=0.5,             # Standard value function coefficient
         max_grad_norm=0.5,       # Standard gradient clipping
         n_epochs=10,             # Standard number of epochs per update
@@ -44,15 +44,15 @@ def main():
     eval_cb = EvalCallback(eval_venv, best_model_save_path="./runs/best/",
                            log_path="./runs/eval/", eval_freq=10_000,
                            deterministic=True, render=False)
-    ckpt_cb = CheckpointCallback(save_freq=50_000, save_path="./runs/ckpt/", name_prefix="ppo_tripod")
+    ckpt_cb = CheckpointCallback(save_freq=50_000, save_path="./runs/ckpt/", name_prefix="ppo_simple")
 
-    # Increased timesteps for tripod gait convergence
-    model.learn(total_timesteps=750_000, callback=[eval_cb, ckpt_cb])
+    # Reduced timesteps - simple gait should learn faster!
+    model.learn(total_timesteps=500_000, callback=[eval_cb, ckpt_cb])
 
     # Save model & normalization stats
-    model.save("./runs/final/ppo_tripod_offline")
+    model.save("./runs/final/ppo_simple_offline")
     train_venv.save("./runs/final/vecnorm.pkl")
-    print("\n✅ Training complete! Model saved to ./runs/final/ppo_tripod_offline.zip")
+    print("\n✅ Training complete! Model saved to ./runs/final/ppo_simple_offline.zip")
 
     train_venv.close(); eval_venv.close()
 

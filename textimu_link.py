@@ -11,8 +11,16 @@ TICKS_PER_REV = 4096
 TICKS2RAD = 2 * math.pi / TICKS_PER_REV
 RAD2TICKS = 1.0 / TICKS2RAD
 
-# Real joint limits (radians). Center at 180° (2048 ticks) ± 45°
-JOINT_LIMITS_H = [(-0.785, 0.785)] * 6  # ±45° from center (135° to 225°)
+# Real joint limits (radians). Center at 180° (2048 ticks) ± angle
+# Horizontal: FL, FR, ML, MR, RL, RR
+JOINT_LIMITS_H = [
+    (-0.785, 0.785),  # FLH: ±45°
+    (-0.785, 0.785),  # FRH: ±45°
+    (-0.785, 0.785),  # MLH: ±45°
+    (-0.785, 0.785),  # MRH: ±45°
+    (-1, 0.785),  
+    (-0.785, 1), 
+]
 JOINT_LIMITS_V = [(-0.785, 0.785)] * 6  # ±45° from center (135° to 225°)
 JOINT_LIMITS_12 = JOINT_LIMITS_H + JOINT_LIMITS_V
 

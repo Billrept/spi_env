@@ -9,7 +9,7 @@
 import gymnasium as gym
 import numpy as np, math, time, random
 from gymnasium import spaces
-from textimu_link import CH_MAP_12, INVERT_12, TICKS2RAD
+from textimu_link import CH_MAP_12, INVERT_12, TICKS2RAD, JOINT_LIMITS_12
 
 # ---- control & episode ----
 CTRL_HZ = 50
@@ -334,62 +334,65 @@ class SPIBalance12Env(gym.Env):
         imu = self._imu_online_latest() if self.use_hardware else self._imu_offline()
         obs = self._obs_from_imu(imu)
 
-        # ===== REWARD FUNCTION: Tripod Gait =====
-        # Goal: Learn tripod gait with two alternating groups of 3 legs:
-        #   Group A: FL, MR, RL (indices 0, 3, 4)
-        #   Group B: FR, ML, RR (indices 1, 2, 5)
-        # Pattern: While A lifts & swings forward, B stays down & pushes back (and vice versa)
+        # ===== REWARD FUNCTION: Simple Push-Pull Gait (EASIEST) =====
+        # Goal: Learn the SIMPLEST possible locomotion:
+        #   All 6 legs work together in synchronized push-pull cycle
+        #   No complex phase coordination needed!
+        # Pattern: All legs push back together → body moves forward
         
         roll, pitch = obs[0], obs[1]
         qH = obs[9:15]   # horizontal joint angles [FL, FR, ML, MR, RL, RR]
         qV = obs[15:21]  # vertical joint angles [FLV, FRV, MLV, MRV, RLV, RRV]
-        
-        # Define tripod groups (indices in 6-leg array)
-        # Group A: FL(0), MR(3), RL(4)
-        # Group B: FR(1), ML(2), RR(5)
-        groupA_H = np.array([qH[0], qH[3], qH[4]], dtype=np.float32)  # FL, MR, RL horizontal
-        groupA_V = np.array([qV[0], qV[3], qV[4]], dtype=np.float32)  # FL, MR, RL vertical
-        groupB_H = np.array([qH[1], qH[2], qH[5]], dtype=np.float32)  # FR, ML, RR horizontal
-        groupB_V = np.array([qV[1], qV[2], qV[5]], dtype=np.float32)  # FR, ML, RR vertical
         
         # 1. Forward progress reward (PRIMARY OBJECTIVE - DOMINANT REWARD)
         forward_distance = self._position_x - self._last_position_x
         r_forward = 1000.0 * forward_distance
         self._last_position_x = self._position_x
         
-        # 2. Stability reward - stay upright
+        # 2. Stability reward - stay upright (increased weight for simpler gait)
         angle_mag = math.sqrt(roll**2 + pitch**2)
-        r_upright = 0.5 * math.exp(-2.5 * angle_mag)
+        r_upright = 1.0 * math.exp(-2.5 * angle_mag)
         
-        # 3. Tripod phase alternation - encourage opposite vertical phases
-        #    When A is lifted (positive V), B should be down (zero V), and vice versa
-        #    Reward when vertical positions are anti-correlated
-        meanA_V = float(np.mean(groupA_V))
-        meanB_V = float(np.mean(groupB_V))
-        phase_opposite = -(meanA_V * meanB_V)  # Negative product = opposite signs
-        r_phase = 1.0 * np.clip(phase_opposite, 0, 0.15)  # Max reward when one up, one down
+        # 3. Synchronized horizontal movement - encourage all legs to move together
+        #    Reward when all horizontal joints have similar positions (synchronized)
+        mean_qH = float(np.mean(qH))
+        # Reward low variance = all legs moving in sync
+        variance_qH = float(np.var(qH))
+        r_sync = 0.5 * math.exp(-5.0 * variance_qH)  # Higher reward when variance is low
         
-        # 4. Horizontal coordination - encourage forward swinging
-        #    Reward when groups move horizontally (creating propulsion)
-        #    Allow both forward (+) and backward (-) movements
-        meanA_H_abs = float(np.mean(np.abs(groupA_H)))
-        meanB_H_abs = float(np.mean(np.abs(groupB_H)))
-        r_h_motion = 0.5 * (meanA_H_abs + meanB_H_abs)  # Reward horizontal movement
+        # 4. Oscillation reward - encourage rhythmic back-and-forth movement
+        #    All legs should be moving (changing position over time)
+        theta_change_H = np.abs(self._theta_cmd[:6] - self._theta_cmd_prev[:6])  # Horizontal only
+        mean_motion = float(np.mean(theta_change_H))
+        r_oscillation = 2.0 * np.clip(mean_motion, 0, 0.2)  # Reward up to 0.4 for good motion
         
-        # 5. Energy efficiency - penalize large actions
+        # 5. Keep vertical legs mostly down - simpler than lifting
+        #    Small penalty for excessive vertical movement (let policy learn minimal lift if needed)
+        mean_qV_abs = float(np.mean(np.abs(qV)))
+        r_vertical = -0.1 * mean_qV_abs  # Slight penalty for lifting (but not forbidden)
+        
+        # 6. Energy efficiency - penalize large actions
         r_smooth = -0.001 * float(np.sum(action**2))
         
-        # 6. STRONG saturation penalty - heavily penalize ANY joints at limits
-        at_limits_all = (np.abs(self._theta_cmd) > 0.75).sum()
+        # 7. STRONG saturation penalty - heavily penalize ANY joints at limits
+        # Check against actual joint limits (accounts for asymmetric rear leg limits)
+        at_limits_all = 0
+        for i in range(12):
+            lo, hi = JOINT_LIMITS_12[i]
+            # Consider "at limit" if within 5% of range from either limit
+            range_size = hi - lo
+            threshold = 0.05 * range_size
+            if self._theta_cmd[i] < (lo + threshold) or self._theta_cmd[i] > (hi - threshold):
+                at_limits_all += 1
         r_saturation = -5.0 * (at_limits_all / 12.0)
         
-        # 7. Stuck penalty - penalize when joints stop moving
+        # 8. Stuck penalty - penalize when joints stop moving
         theta_change_all = np.abs(self._theta_cmd - self._theta_cmd_prev)
         mean_change = float(np.mean(theta_change_all))
         r_stuck = -2.0 if mean_change < 0.001 else 0.0
         self._theta_cmd_prev = self._theta_cmd.copy()
         
-        # 8. Tracking error penalty - closed-loop feedback (hardware only)
+        # 9. Tracking error penalty - closed-loop feedback (hardware only)
         if self.use_hardware and hasattr(self, '_theta_actual'):
             tracking_error = np.abs(self._theta_cmd - self._theta_actual)
             mean_tracking_error = float(np.mean(tracking_error))
@@ -397,8 +400,8 @@ class SPIBalance12Env(gym.Env):
         else:
             r_tracking = 0.0
         
-        # Total reward: Simpler than middle-leg gait (8 components vs 10)
-        reward = (r_forward + r_upright + r_phase + r_h_motion + 
+        # Total reward: SIMPLEST gait (9 components, no complex phase coordination)
+        reward = (r_forward + r_upright + r_sync + r_oscillation + r_vertical + 
                   r_smooth + r_saturation + r_stuck + r_tracking)
 
         terminated = (abs(math.degrees(roll)) > self.fall_deg) or (abs(math.degrees(pitch)) > self.fall_deg)
