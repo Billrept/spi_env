@@ -160,7 +160,7 @@ class SPIBalance12Env(gym.Env):
         
         # Update position
         forward_vel = self._velocity_x
-        
+
         # ===== BALANCE DYNAMICS =====
         # Leg mapping: 0=FL, 1=FR, 2=ML, 3=MR, 4=RL, 5=RR
         # Left legs = 0(FL), 2(ML), 4(RL)
@@ -334,17 +334,23 @@ class SPIBalance12Env(gym.Env):
         imu = self._imu_online_latest() if self.use_hardware else self._imu_offline()
         obs = self._obs_from_imu(imu)
 
-        # ===== REWARD FUNCTION: Middle-Leg Gait Pattern =====
-        # Goal: Learn to walk using middle legs (ML, MR) with pattern:
-        # Lift → Swing Forward → Down → Push Back
+        # ===== REWARD FUNCTION: Tripod Gait =====
+        # Goal: Learn tripod gait with two alternating groups of 3 legs:
+        #   Group A: FL, MR, RL (indices 0, 3, 4)
+        #   Group B: FR, ML, RR (indices 1, 2, 5)
+        # Pattern: While A lifts & swings forward, B stays down & pushes back (and vice versa)
         
         roll, pitch = obs[0], obs[1]
         qH = obs[9:15]   # horizontal joint angles [FL, FR, ML, MR, RL, RR]
         qV = obs[15:21]  # vertical joint angles [FLV, FRV, MLV, MRV, RLV, RRV]
         
-        # Extract middle leg angles
-        MLH, MRH = qH[2], qH[3]  # Middle horizontal (indices 2, 3)
-        MLV, MRV = qV[2], qV[3]  # Middle vertical (indices 8, 9 in full observation)
+        # Define tripod groups (indices in 6-leg array)
+        # Group A: FL(0), MR(3), RL(4)
+        # Group B: FR(1), ML(2), RR(5)
+        groupA_H = np.array([qH[0], qH[3], qH[4]], dtype=np.float32)  # FL, MR, RL horizontal
+        groupA_V = np.array([qV[0], qV[3], qV[4]], dtype=np.float32)  # FL, MR, RL vertical
+        groupB_H = np.array([qH[1], qH[2], qH[5]], dtype=np.float32)  # FR, ML, RR horizontal
+        groupB_V = np.array([qV[1], qV[2], qV[5]], dtype=np.float32)  # FR, ML, RR vertical
         
         # 1. Forward progress reward (PRIMARY OBJECTIVE - DOMINANT REWARD)
         forward_distance = self._position_x - self._last_position_x
@@ -353,57 +359,47 @@ class SPIBalance12Env(gym.Env):
         
         # 2. Stability reward - stay upright
         angle_mag = math.sqrt(roll**2 + pitch**2)
-        r_upright = 0.1 * math.exp(-2.5 * angle_mag)
+        r_upright = 0.5 * math.exp(-2.5 * angle_mag)
         
-        # 3. Middle leg coordination - encourage synchronized opposite movement
-        #    MLH and MRH should move in opposite directions (±0.4 rad)
-        middle_h_opposite = -(MLH * MRH)  # Negative product = opposite signs
-        r_middle_coord = 0.5 * np.clip(middle_h_opposite, 0, 0.4)  # Reward up to 0.2
+        # 3. Tripod phase alternation - encourage opposite vertical phases
+        #    When A is lifted (positive V), B should be down (zero V), and vice versa
+        #    Reward when vertical positions are anti-correlated
+        meanA_V = float(np.mean(groupA_V))
+        meanB_V = float(np.mean(groupB_V))
+        phase_opposite = -(meanA_V * meanB_V)  # Negative product = opposite signs
+        r_phase = 1.0 * np.clip(phase_opposite, 0, 0.15)  # Max reward when one up, one down
         
-        # 4. Vertical lift reward - encourage lifting middle legs
-        #    MLV and MRV should occasionally be positive (lifted)
-        middle_v_lift = np.clip(MLV, 0, 0.3) + np.clip(MRV, 0, 0.3)
-        r_lift = 0.3 * middle_v_lift  # Reward when legs are lifted
+        # 4. Horizontal coordination - encourage forward swinging
+        #    Reward when groups move horizontally (creating propulsion)
+        #    Allow both forward (+) and backward (-) movements
+        meanA_H_abs = float(np.mean(np.abs(groupA_H)))
+        meanB_H_abs = float(np.mean(np.abs(groupB_H)))
+        r_h_motion = 0.5 * (meanA_H_abs + meanB_H_abs)  # Reward horizontal movement
         
-        # 5. Discourage other legs from moving too much
-        #    Front and rear legs should stay mostly neutral
-        other_h = np.concatenate([qH[:2], qH[4:]])  # FL, FR, RL, RR
-        other_v = np.concatenate([qV[:2], qV[4:]])  # FLV, FRV, RLV, RRV
-        r_other_penalty = -0.05 * (float(np.sum(other_h**2)) + float(np.sum(other_v**2)))
-        
-        # 6. Energy efficiency
+        # 5. Energy efficiency - penalize large actions
         r_smooth = -0.001 * float(np.sum(action**2))
         
-        # 7. Oscillation reward - encourage ACTIVE movement in middle legs
-        #    Middle legs should be moving (changing position)
-        theta_change_middle = np.abs(self._theta_cmd[2:4] - self._theta_cmd_prev[2:4])  # MLH, MRH
-        r_oscillation = 0.3 * float(np.mean(theta_change_middle))
-        self._theta_cmd_prev = self._theta_cmd.copy()
+        # 6. STRONG saturation penalty - heavily penalize ANY joints at limits
+        at_limits_all = (np.abs(self._theta_cmd) > 0.75).sum()
+        r_saturation = -5.0 * (at_limits_all / 12.0)
         
-        # 8. STRONG saturation penalty - heavily penalize ANY joints at limits
-        #    Check ALL 12 joints, not just middle legs
-        at_limits_all = (np.abs(self._theta_cmd) > 0.75).sum()  # Count all saturated joints
-        r_saturation = -5.0 * (at_limits_all / 12.0)  # Max penalty: -5.0 if all joints saturated
-        
-        # 9. Stuck penalty - penalize when joints stop moving entirely
-        #    If mean change across ALL joints is near zero, heavily penalize
+        # 7. Stuck penalty - penalize when joints stop moving
         theta_change_all = np.abs(self._theta_cmd - self._theta_cmd_prev)
         mean_change = float(np.mean(theta_change_all))
-        r_stuck = -2.0 if mean_change < 0.001 else 0.0  # -2.0 if completely stuck
+        r_stuck = -2.0 if mean_change < 0.001 else 0.0
+        self._theta_cmd_prev = self._theta_cmd.copy()
         
-        # 10. Tracking error penalty - penalize when actual servo positions deviate from commanded
-        #     This creates closed-loop feedback control (only available with hardware feedback)
+        # 8. Tracking error penalty - closed-loop feedback (hardware only)
         if self.use_hardware and hasattr(self, '_theta_actual'):
             tracking_error = np.abs(self._theta_cmd - self._theta_actual)
             mean_tracking_error = float(np.mean(tracking_error))
-            # Penalize large tracking errors (servo can't keep up or is stuck)
-            r_tracking = -3.0 * mean_tracking_error  # -3.0 if 1 radian error on average
+            r_tracking = -3.0 * mean_tracking_error
         else:
-            r_tracking = 0.0  # No feedback in simulation
+            r_tracking = 0.0
         
-        # Total reward: Forward movement + coordination + avoid saturation + feedback control
-        reward = (r_forward + r_upright + r_middle_coord + r_lift + 
-                  r_other_penalty + r_smooth + r_oscillation + r_saturation + r_stuck + r_tracking)
+        # Total reward: Simpler than middle-leg gait (8 components vs 10)
+        reward = (r_forward + r_upright + r_phase + r_h_motion + 
+                  r_smooth + r_saturation + r_stuck + r_tracking)
 
         terminated = (abs(math.degrees(roll)) > self.fall_deg) or (abs(math.degrees(pitch)) > self.fall_deg)
         truncated  = (self._t >= self.steps_max)

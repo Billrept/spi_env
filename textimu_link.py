@@ -23,8 +23,10 @@ CH_MAP_12 = CH_MAP_H + CH_MAP_V
 
 # Motor inversion flags (True = invert direction)
 # Joint order: [FLH, FRH, MLH, MRH, RLH, RRH, FLV, FRV, MLV, MRV, RLV, RRV]
-INVERT_12 = [False, False, False, False, False, False,  # RLH inverted (index 4)
-             False, False, False, False, False, False]
+# Horizontal: Right side (FRH, MRH, RRH) inverted because CCW rotation = backward swing
+# Vertical: All same (up is up for both sides)
+INVERT_12 = [False, True, False, True, False, True,   # H: Left=False, Right=True
+             False, False, False, False, False, False]  # V: All False
 
 # ===== Remocon framing =====
 # value16 = [motor_id:4 bits][ticks:12 bits]; packet = FF 55 LB ~LB HB ~HB
