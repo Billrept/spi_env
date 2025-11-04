@@ -143,4 +143,4 @@ while True:
     servo_positions = [mot[sid].goal_position() for sid in MOT_IDS]
     print("Servo Positions:", " ".join(["ID{}:{}".format(sid, pos) for sid, pos in zip(MOT_IDS, servo_positions)]))
 
-    delay(20)  # ~50
+    delay(20)  # ~50Hz update rate
