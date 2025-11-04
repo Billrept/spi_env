@@ -3,12 +3,13 @@
 #   - use_hardware=True:  serial IMU + remocon packets; run on robot
 #
 # TASK: Forward locomotion - move the spider robot forward using horizontal joints
-# obs = IMU (9) + commanded angles (12) = 21-D
+# obs = IMU (9) + commanded angles (12) = 21-D OR 45-D (with feedback)
 # actions = 12 deltas (radians): [H1..H6, V1..V6]
 
 import gymnasium as gym
 import numpy as np, math, time, random
 from gymnasium import spaces
+from textimu_link import CH_MAP_12, INVERT_12, TICKS2RAD
 
 # ---- control & episode ----
 CTRL_HZ = 50
@@ -43,12 +44,18 @@ class SPIBalance12Env(gym.Env):
         # Track forward position for locomotion reward
         self._position_x = 0.0  # forward distance traveled
         self._last_position_x = 0.0
-        # obs: [roll, pitch, yaw, gx, gy, gz, ax, ay, az, qH1..qH6, qV1..qV6] (21-D)
+        self._theta_actual = np.zeros(12, dtype=np.float32)  # Actual servo positions (hardware feedback)
+        
+        # obs: [roll, pitch, yaw, gx, gy, gz, ax, ay, az, theta_cmd(12), theta_actual(12), error(12)]
+        # Hardware mode: 45-D (9 IMU + 12 cmd + 12 actual + 12 error)
+        # Simulation mode: 21-D (9 IMU + 12 cmd)
+        # Use larger space to accommodate both modes
         high_imu = np.array([math.pi]*3 + [50.0]*3 + [5.0]*3, dtype=np.float32)
         high_q   = np.array([0.785]*12, dtype=np.float32)  # ±45° joint limits
+        high_error = np.array([1.57]*12, dtype=np.float32)  # Max tracking error ±90°
         self.observation_space = spaces.Box(
-            low=-np.concatenate([high_imu, high_q]),
-            high=np.concatenate([high_imu, high_q]),
+            low=-np.concatenate([high_imu, high_q, high_q, high_error]),
+            high=np.concatenate([high_imu, high_q, high_q, high_error]),
             dtype=np.float32
         )
 
@@ -99,7 +106,7 @@ class SPIBalance12Env(gym.Env):
         # Leg mapping: 0=FL, 1=FR, 2=ML, 3=MR, 4=RL, 5=RR
         # Left legs (0,2,4): Negative qH = sweep outward/back = push forward
         # Right legs (1,3,5): POSITIVE qH = sweep inward/back = push forward
-        
+
         # ===== FORWARD LOCOMOTION MECHANICS =====
         # Calculate net forward force from all 6 legs
         # Key insight: Coordinated pairs create balanced forward push
@@ -246,7 +253,43 @@ class SPIBalance12Env(gym.Env):
         roll, pitch, yaw = imu["rpy"]
         gx, gy, gz = imu["gyro"]
         ax, ay, az = imu["acc"]
-        return np.array([roll, pitch, yaw, gx, gy, gz, ax, ay, az, *self._theta_cmd], dtype=np.float32)
+        
+        # Extract actual servo positions if available (for hardware feedback)
+        if "servo_positions" in imu and self.use_hardware:
+            servo_dict = imu["servo_positions"]
+            # Convert motor IDs to joint angles in our joint order
+            theta_actual = np.zeros(12, dtype=np.float32)
+            for joint_idx in range(12):
+                motor_id = CH_MAP_12[joint_idx]
+                if motor_id in servo_dict:
+                    ticks = servo_dict[motor_id]
+                    # Convert ticks to radians (center=2048, ±45° = ±651 ticks)
+                    angle_rad = (ticks - 2048) * TICKS2RAD
+                    # Apply inversion if needed
+                    if INVERT_12[joint_idx]:
+                        angle_rad = -angle_rad
+                    theta_actual[joint_idx] = angle_rad
+                else:
+                    # Fallback to commanded if feedback not available
+                    theta_actual[joint_idx] = self._theta_cmd[joint_idx]
+            
+            # Store for tracking error calculation
+            self._theta_actual = theta_actual
+            
+            # Observation: [IMU(9), theta_cmd(12), theta_actual(12), tracking_error(12)]
+            tracking_error = self._theta_cmd - theta_actual
+            return np.array([roll, pitch, yaw, gx, gy, gz, ax, ay, az, 
+                           *self._theta_cmd, *theta_actual, *tracking_error], dtype=np.float32)
+        else:
+            # Simulation mode or no servo feedback: assume perfect tracking
+            # Use an explicit `theta_actual` variable (copy of commanded) so the
+            # returned observation is clearer and avoids accidental duplication.
+            # Observation: [IMU(9), theta_cmd(12), theta_actual(12)=theta_cmd, tracking_error(12)=0]
+            # Must match 45-D observation space size
+            theta_actual = self._theta_cmd.copy()
+            zero_error = np.zeros(12, dtype=np.float32)
+            return np.array([roll, pitch, yaw, gx, gy, gz, ax, ay, az,
+                             *self._theta_cmd, *theta_actual, *zero_error], dtype=np.float32)
 
     # ---------- Gym API ----------
     def reset(self, *, seed=None, options=None):
@@ -348,9 +391,19 @@ class SPIBalance12Env(gym.Env):
         mean_change = float(np.mean(theta_change_all))
         r_stuck = -2.0 if mean_change < 0.001 else 0.0  # -2.0 if completely stuck
         
-        # Total reward: Forward movement + middle leg coordination + avoid saturation + avoid stuck
+        # 10. Tracking error penalty - penalize when actual servo positions deviate from commanded
+        #     This creates closed-loop feedback control (only available with hardware feedback)
+        if self.use_hardware and hasattr(self, '_theta_actual'):
+            tracking_error = np.abs(self._theta_cmd - self._theta_actual)
+            mean_tracking_error = float(np.mean(tracking_error))
+            # Penalize large tracking errors (servo can't keep up or is stuck)
+            r_tracking = -3.0 * mean_tracking_error  # -3.0 if 1 radian error on average
+        else:
+            r_tracking = 0.0  # No feedback in simulation
+        
+        # Total reward: Forward movement + coordination + avoid saturation + feedback control
         reward = (r_forward + r_upright + r_middle_coord + r_lift + 
-                  r_other_penalty + r_smooth + r_oscillation + r_saturation + r_stuck)
+                  r_other_penalty + r_smooth + r_oscillation + r_saturation + r_stuck + r_tracking)
 
         terminated = (abs(math.degrees(roll)) > self.fall_deg) or (abs(math.degrees(pitch)) > self.fall_deg)
         truncated  = (self._t >= self.steps_max)

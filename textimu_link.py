@@ -23,7 +23,7 @@ CH_MAP_12 = CH_MAP_H + CH_MAP_V
 
 # Motor inversion flags (True = invert direction)
 # Joint order: [FLH, FRH, MLH, MRH, RLH, RRH, FLV, FRV, MLV, MRV, RLV, RRV]
-INVERT_12 = [False, False, False, False, True, False,  # RLH inverted (index 4)
+INVERT_12 = [False, False, False, False, False, False,  # RLH inverted (index 4)
              False, False, False, False, False, False]
 
 # ===== Remocon framing =====
@@ -117,8 +117,34 @@ class Remocon12Link:
         except Exception:
             return None
 
+    def _parse_servo_line(self, line: str) -> Optional[dict]:
+        """Parse servo positions from line like:
+        'Servo Positions: ID1:2048 ID2:2048 ID3:2048 ...'
+        Returns dict: {motor_id -> ticks} for motors 1-12
+        """
+        try:
+            if "Servo Positions:" not in line:
+                return None
+            
+            servo_dict = {}
+            # Find all ID:value pairs
+            matches = re.findall(r'ID(\d+):(\d+)', line)
+            for motor_id_str, ticks_str in matches:
+                motor_id = int(motor_id_str)
+                if 1 <= motor_id <= 12:
+                    ticks = int(ticks_str)
+                    servo_dict[motor_id] = ticks
+            
+            # Only return if we got all 12 motors
+            if len(servo_dict) == 12:
+                return servo_dict
+            return None
+        except Exception:
+            return None
+
     def _reader(self):
         kf_rp = None
+        servo_positions = None
         while self._running:
             try:
                 line = self.ser.readline().decode(errors="ignore").strip()
@@ -130,10 +156,15 @@ class Remocon12Link:
                         if kf_rp:
                             r, p = kf_rp
                             raw["rpy"] = (r, p, raw["rpy"][2])
+                        # Add servo feedback if available
+                        if servo_positions:
+                            raw["servo_positions"] = servo_positions
                         with self._lock:
                             self._last_imu = raw
                 elif "KF" in line:
                     kf_rp = self._parse_kf_line(line) or kf_rp
+                elif "Servo Positions:" in line:
+                    servo_positions = self._parse_servo_line(line)
             except Exception:
                 time.sleep(0.01)
 
