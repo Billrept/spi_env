@@ -48,13 +48,14 @@ def accel_to_roll_pitch_deg(ax_g, ay_g, az_g):
 # ----- Gyro bias calibration (use scaled units) -----
 print("Calibrating gyro bias... keep still")
 N = 200
-gx_b = 0.0; gy_b = 0.0
+gx_b = 0.0; gy_b = 0.0; gz_b = 0.0  # Added gz_b
 for _ in range(N):
     gx_b += imu.gyro_x() / 100.0   # centi-deg/s → deg/s
     gy_b += imu.gyro_y() / 100.0
+    gz_b += imu.gyro_z() / 100.0   # Added gz measurement
     delay(5)
-gx_b /= N; gy_b /= N
-print("Gyro bias (deg/s):", gx_b, gy_b)
+gx_b /= N; gy_b /= N; gz_b /= N    # Added gz averaging
+print("Gyro bias (deg/s):", gx_b, gy_b, gz_b)  # Added gz to print
 
 # ----- Init filters with accel-only angle (scaled) -----
 ax = imu.accel_x()/1000.0; ay = imu.accel_y()/1000.0; az = imu.accel_z()/1000.0  # mg → g
@@ -120,6 +121,7 @@ while True:
     ax = imu.accel_x()/1000.0; ay = imu.accel_y()/1000.0; az = imu.accel_z()/1000.0  # g
     gx = imu.gyro_x()/100.0 - gx_b   # deg/s
     gy = imu.gyro_y()/100.0 - gy_b   # deg/s
+    gz = imu.gyro_z()/100.0 - gz_b   # Added gz measurement
 
     roll_acc,  pitch_acc  = accel_to_roll_pitch_deg(ax, ay, az)  # deg
     roll_kf  = kf_roll.update(roll_acc,  gx, dt)                 # deg
@@ -128,8 +130,8 @@ while True:
     # (Optional) yaw in centi-deg → deg if you want to print it:
     yaw_deg = imu.yaw() / 100.0
 
-    print("RAW  R/P/Y(deg): {:.2f} {:.2f} {:.2f} | ACC(g): {:.3f} {:.3f} {:.3f} | GYRO(dps): {:.2f} {:.2f}"
-          .format(imu.roll()/100.0, imu.pitch()/100.0, yaw_deg, ax, ay, az, gx, gy))
+    print("RAW  R/P/Y(deg): {:.2f} {:.2f} {:.2f} | ACC(g): {:.3f} {:.3f} {:.3f} | GYRO(dps): {:.2f} {:.2f} {:.2f}"
+          .format(imu.roll()/100.0, imu.pitch()/100.0, yaw_deg, ax, ay, az, gx, gy, gz))  # Added gz to print
     print("KF   R/P(deg):   {:.2f} {:.2f}".format(roll_kf, pitch_kf))
 
     delay(20)  # ~50
