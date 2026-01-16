@@ -243,23 +243,3 @@ model = PPO.load("./runs/final/ppo_spi12_offline.zip", env=venv)
 
 ---
 
-## License
-
-Choose what fits your needs (e.g., MIT):
-
-```
-MIT License
-Copyright (c) 2025 ...
-Permission is hereby granted, free of charge, to any person obtaining a copy...
-```
-
----
-
-## Acknowledgements
-
-Built with **Gymnasium** and **Stable-Baselines3**.  
-Thanks to the SPI/CM-550 community for serial formats and IMU parsing patterns.
-
----
-
-**Questions or edits?** Open an issue or ping in chat with mapping, units, or routines you want baked in.
